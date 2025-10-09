@@ -73,16 +73,13 @@ namespace mylib {
         };
 
         template<typename CharT, typename Alloc>
-        constexpr allocation_result allocate(const Alloc& source, std::size_t capacity) noexcept {
+        constexpr allocation_result allocate(const Alloc& source, std::size_t capacity) {
             using source_traits = std::allocator_traits<Alloc>;
             using allocator = typename source_traits::template rebind_alloc<cow_string_control_block>;
             using traits = std::allocator_traits<allocator>;
             allocator alloc(source);
             const std::size_t total_size = sizeof(CharT) * (capacity + 1) / sizeof(cow_string_control_block) + 2;
-            cow_string_control_block* block = traits::allocate(alloc, total_size);
-            if (!block) {
-                return {};
-            }
+            cow_string_control_block* block = traits::allocate(alloc, total_size); // may throw here
             traits::construct(alloc, block, total_size, 1);
             const std::size_t actual_capacity = (total_size - 1) * sizeof(cow_string_control_block) / sizeof(CharT) - 1;
             return { block, actual_capacity };
@@ -673,10 +670,7 @@ namespace mylib {
         constexpr void pop_back() {
             const size_type old_size = size();
             [[assume(old_size > 0)]];
-            resize_and_overwrite(old_size - 1,
-                [](char_type* p, size_type count) constexpr noexcept {
-                return count;
-            });
+            resize(old_size - 1);
         }
 
         constexpr basic_cow_string& append(const size_type count, const char_type ch) {
@@ -1079,7 +1073,7 @@ namespace mylib {
         constexpr bool shared() const noexcept { return (this->control & this->shared_mask) != 0; }
         constexpr bool allocated() const noexcept { return (this->control & this->allocated_mask) != 0; }
 
-        void deallocate_if_needed() noexcept {
+        constexpr void deallocate_if_needed() noexcept {
             if (allocated()) {
                 auto* const block = control_block();
                 if (shared()) {
@@ -1092,13 +1086,11 @@ namespace mylib {
             }
         }
 
-        char_type* allocate_exclusive_buffer(const string_view_type str, const std::size_t capacity) {
+        constexpr char_type* allocate_exclusive_buffer(
+            const string_view_type str, const std::size_t capacity) {
             const char_type* const str_data = str.data();
             const std::size_t size = std::ranges::min(str.size(), capacity);
             auto [block, actual_capacity] = details::allocate<char_type>(get_allocator(), capacity);
-            if (!block) {
-                throw std::bad_alloc();
-            }
             char_type* const data = block->template data<char_type>();
             std::ranges::copy_n(str_data, size, data);
             data[size] = char_type();
@@ -1110,12 +1102,12 @@ namespace mylib {
             return data;
         }
 
-        char_type* allocate_exclusive_buffer(const string_view_type str) {
+        constexpr char_type* allocate_exclusive_buffer(const string_view_type str) {
             return allocate_exclusive_buffer(str, str.size());
         }
 
         // Post-condition: exclusive
-        char_type* reserve_or_exclusive_shrink(const size_type new_cap) {
+        constexpr char_type* reserve_or_exclusive_shrink(const size_type new_cap) {
             if (!unique()) {
                 if (new_cap > this->sso_capacity) {
                     return allocate_exclusive_buffer(view(), new_cap);
@@ -1137,9 +1129,9 @@ namespace mylib {
             }
         }
 
-        char_type* exclusive() { return reserve_or_exclusive_shrink(size()); }
+        constexpr char_type* exclusive() { return reserve_or_exclusive_shrink(size()); }
 
-        char_type* write_sso_buffer(const string_view_type str) noexcept {
+        constexpr char_type* write_sso_buffer(const string_view_type str) noexcept {
             const std::size_t size = str.size();
             char_type* const data = sso_data();
             std::ranges::copy_n(str.data(), size, data);
@@ -1148,7 +1140,7 @@ namespace mylib {
             return data;
         }
 
-        char_type* write_allocated_buffer(const string_view_type str) {
+        constexpr char_type* write_allocated_buffer(const string_view_type str) {
             const std::size_t size = str.size();
             char_type* const data = allocated_data();
             std::ranges::copy_n(str.data(), size, data);
@@ -1158,18 +1150,18 @@ namespace mylib {
             return data;
         }
 
-        char_type* sso_data() noexcept { return this->storage.small; }
-        const char_type* sso_data() const noexcept { return this->storage.small; }
+        constexpr char_type* sso_data() noexcept { return this->storage.small; }
+        constexpr const char_type* sso_data() const noexcept { return this->storage.small; }
 
-        char_type* allocated_data() noexcept {
+        constexpr char_type* allocated_data() noexcept {
             return control_block()->template data<char_type>();
         }
 
-        const char_type* allocated_data() const noexcept {
+        constexpr const char_type* allocated_data() const noexcept {
             return this->storage.non_sso.data;
         }
 
-        char_type* data_unsafe() noexcept {
+        constexpr char_type* data_unsafe() noexcept {
             if (allocated()) {
                 return allocated_data();
             } else {
@@ -1181,7 +1173,7 @@ namespace mylib {
             }
         }
 
-        const char_type* data_unsafe() const noexcept {
+        constexpr const char_type* data_unsafe() const noexcept {
             if (allocated()) {
                 return allocated_data();
             } else {

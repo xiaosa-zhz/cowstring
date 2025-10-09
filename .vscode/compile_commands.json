@@ -1,0 +1,11 @@
+[
+{
+  "directory": "/home/xiaosa/source/cowstring",
+  "arguments": ["/usr/local/bin/clang", "-c", "-Qunused-arguments", "-m64", "-stdlib=libc++", "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-O3", "-std=c++26", "-Iincludes", "-finput-charset=UTF-8", "-fexec-charset=UTF-8", "-DNDEBUG", "-o", "build/.objs/llvm/linux/x86_64/release/src/main.cpp.o", "src/main.cpp"],
+  "file": "src/main.cpp"
+},
+{
+  "directory": "/home/xiaosa/source/cowstring",
+  "arguments": ["/usr/local/bin/gcc", "-c", "-m64", "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-O3", "-std=c++26", "-Iincludes", "-finput-charset=UTF-8", "-fexec-charset=UTF-8", "-DNDEBUG", "-o", "build/.objs/gnu/linux/x86_64/release/src/main.cpp.o", "src/main.cpp"],
+  "file": "src/main.cpp"
+}]

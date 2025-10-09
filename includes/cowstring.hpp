@@ -1269,6 +1269,14 @@ namespace mylib {
             return result;
         }
 
+        template<typename CharT, typename Alloc>
+        basic_cow_string<CharT, Alloc> operator+(
+            const std::type_identity_t<std::basic_string_view<CharT>> lhs,
+            basic_cow_string<CharT, Alloc>&& rhs) noexcept {
+            rhs.insert(0, lhs);
+            return std::move(rhs);
+        }
+
     } // namespace cow_string_operators
 
     namespace literals::inline cow_string_literals {

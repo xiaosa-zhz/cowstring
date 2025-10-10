@@ -1120,7 +1120,11 @@ namespace mylib {
         }
 
         // Post-condition: exclusive
+        // Post-condition: const data == data
         constexpr char_type* reserve_or_exclusive_shrink(const size_type new_cap) {
+            // Get new buffer if is shared with other strings or holds literal.
+            // In this case, new buffer always have capacity of new_cap regardless of current capacity.
+            // Tail contents are discarded if new_cap < size().
             if (!unique()) {
                 if (new_cap > this->sso_capacity) {
                     return allocate_exclusive_buffer(view(), new_cap);
@@ -1134,6 +1138,7 @@ namespace mylib {
                 } else {
                     if (allocated() && allocated_data() != std::as_const(*this).allocated_data()) {
                         // alias string
+                        // move contents to front to ensure full capacity is available
                         return write_allocated_buffer(view());
                     } else {
                         return data_unsafe();

@@ -1293,7 +1293,7 @@ namespace mylib {
     namespace literals::inline cow_string_literals {
 
         template<details::cow_string_literal_helper helper>
-        consteval typename decltype(helper)::cow_string_type operator""_cowstr() {
+        consteval auto operator""_cowstr() -> typename decltype(helper)::cow_string_type {
             return helper.literal;
         }
 

@@ -1186,6 +1186,25 @@ namespace mylib {
         }
     };
 
+    template<typename CharT, typename Alloc, typename U = CharT>
+    constexpr auto erase(basic_cow_string<CharT, Alloc>& c, const U& value)
+        -> typename basic_cow_string<CharT, Alloc>::size_type {
+        auto it = std::ranges::remove(c, value);
+        const auto count = std::ranges::distance(it, c.end());
+        c.erase(it, c.end());
+        return count;
+    }
+
+    template<typename CharT, typename Alloc, typename Pred>
+    constexpr auto erase_if(basic_cow_string<CharT, Alloc>& c, Pred pred)
+        -> typename basic_cow_string<CharT, Alloc>::size_type {
+        auto it = std::ranges::remove_if(c, std::move(pred));
+        const auto count = std::ranges::distance(it, c.end());
+        c.erase(it, c.end());
+        return count;
+    }
+
+
     inline namespace cow_string_operators {
 
         template<typename CharT, typename Alloc1, typename Alloc2>

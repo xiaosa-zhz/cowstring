@@ -1,6 +1,7 @@
 #include <format>
 #include <print>
 
+#define MYLIB_COW_STRING_TEST_STATUS
 #include "cowstring.hpp"
 
 int main() {
@@ -10,7 +11,8 @@ int main() {
     str.append(" I am a Copy-On-Write string. Nice to meet you!");
     std::println("{} {}", str, str.is_owned());
     mylib::cow_string str2 = str;
-    std::println("{} {}", str2, str2.is_shared());
+    std::println("{} {} {} {}", str2, str2.is_shared(),
+        str2.reference_counter(), str.reference_counter());
     const std::string_view cow = "Copy-On-Write";
     const std::string_view short_cow = "COW";
     const std::string_view long_cow = "Copy-On-Write (COW)";

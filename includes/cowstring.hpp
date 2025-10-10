@@ -63,7 +63,7 @@ namespace mylib {
                 return std::launder(static_cast<CharT*>(static_cast<void*>(this + 1)));
             }
 
-            std::size_t block_count = 0;
+            const std::size_t block_count = 0;
             std::atomic_size_t reference_counter = 0;
         };
 
@@ -297,6 +297,8 @@ namespace mylib {
             deallocate_if_needed();
         }
 
+#ifdef MYLIB_COW_STRING_TEST_STATUS
+
         // For test only
         constexpr bool is_sso() const noexcept {
             return !shared() && !allocated();
@@ -316,6 +318,17 @@ namespace mylib {
         constexpr bool is_shared() const noexcept {
             return shared() && allocated();
         }
+
+        // For test only
+        constexpr std::size_t reference_counter() const noexcept {
+            if (allocated()) {
+                return control_block()->reference_counter.load(std::memory_order_relaxed);
+            } else {
+                return 0;
+            }
+        }
+
+#endif // MYLIB_COW_STRING_TEST_STATUS
         
         // Non-modifying methods
 

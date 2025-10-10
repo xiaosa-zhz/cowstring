@@ -558,8 +558,8 @@ namespace mylib {
 
         constexpr void swap(basic_cow_string& other) noexcept {
             std::ranges::swap((allocator_type&)*this, (allocator_type&)other);
-            std::ranges::swap((details::storage_block<char_type>&)(*this),
-                (details::storage_block<char_type>&)other);
+            using storage = details::storage_block<char_type>;
+            std::ranges::swap((storage&)(*this), (storage&)other);
         }
 
         constexpr basic_cow_string& assign(std::nullptr_t) = delete;

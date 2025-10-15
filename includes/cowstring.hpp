@@ -119,6 +119,30 @@ namespace mylib {
             CharT literal[N];
         };
 
+        // Allocator strategy of cow_string
+        // On copy:
+        //  If allocator_traits::is_always_equal is true, life is easy;
+        //  If not but propagate_on_container_copy_assignment is true, just copy assign
+        //  the allocator, then here is this->get_allocator() == other.get_allocator(), and
+        //  life is still easy;
+        //  If both is false, we have to do deep copy if allocators are not equal, and
+        //  the copy ctor has to be marked as throwing anyway.
+        // On move:
+        //  Things are basically the same as copy.
+        // On swap:
+        //  Things are basically the same as copy, but if deep copy is needed, we have to
+        //  allocate a temporary buffer and copy 3 times.
+        template<typename AllocatorTraits>
+        struct cow_string_allocator_propagate_traits {
+            static constexpr bool is_always_equal = AllocatorTraits::is_always_equal::value;
+            static constexpr bool simple_copy = is_always_equal
+                || AllocatorTraits::propagate_on_container_copy_assignment::value;
+            static constexpr bool simple_move = is_always_equal
+                || AllocatorTraits::propagate_on_container_move_assignment::value;
+            static constexpr bool simple_swap = is_always_equal
+                || AllocatorTraits::propagate_on_container_swap::value;
+        };
+
     } // namespace mylib::details
 
     template<typename CharT, typename Allocator = std::allocator<CharT>>
@@ -182,49 +206,13 @@ namespace mylib {
         constexpr basic_cow_string(std::nullptr_t) = delete;
 
         constexpr basic_cow_string(const basic_cow_string& other) noexcept
-            : basic_cow_string(other.get_allocator()) {
-            if (other.allocated()) {
-                // owned or shared string
-                // share with source
-                other.control |= 0b01; // mark as shared
-                this->control = other.control;
-                this->storage.non_sso = other.storage.non_sso;
-                control_block()->reference_counter.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                if (other.shared()) {
-                    // literal string
-                    this->storage.non_sso = other.storage.non_sso;
-                    this->control = other.control;
-                } else {
-                    // small string
-                    const std::size_t size = other.control >> 2;
-                    std::ranges::copy_n(other.storage.small, size + 1, this->storage.small);
-                    this->control = other.control;
-                }
-            }
+            : allocator_type(other.allocator_copy()) {
+            set_states_on_copy(other);
         }
 
         constexpr basic_cow_string(basic_cow_string&& other) noexcept
-            : basic_cow_string(other.get_allocator()) {
-            if (other.allocated()) {
-                // owned or shared string
-                // set source to sso empty string
-                this->control = other.control;
-                this->storage.non_sso = other.storage.non_sso;
-                other.control = 0;
-                other.storage.small[0] = char_type();
-            } else {
-                if (other.shared()) {
-                    // literal string
-                    this->storage.non_sso = other.storage.non_sso;
-                    this->control = other.control;
-                } else {
-                    // small string
-                    const std::size_t size = other.control >> 2;
-                    std::ranges::copy_n(other.storage.small, size + 1, this->storage.small);
-                    this->control = other.control;
-                }
-            }
+            : allocator_type(std::move(other).allocator_move()) {
+            set_states_on_move(std::move(other));
         }
 
         constexpr basic_cow_string(const basic_cow_string& other,
@@ -569,30 +557,102 @@ namespace mylib {
             }
         }
 
-        constexpr void swap(basic_cow_string& other) noexcept {
-            std::ranges::swap((allocator_type&)*this, (allocator_type&)other);
-            using storage = details::storage_block<char_type>;
-            std::ranges::swap((storage&)(*this), (storage&)other);
+    private:
+        using propagate_traits = details::cow_string_allocator_propagate_traits<allocator_traits_type>;
+        static constexpr bool is_always_equal = propagate_traits::is_always_equal;
+        static constexpr bool simple_copy = propagate_traits::simple_copy;
+        static constexpr bool simple_move = propagate_traits::simple_move;
+        static constexpr bool simple_swap = propagate_traits::simple_swap;
+
+    public:
+        constexpr void swap(basic_cow_string& other) noexcept(simple_swap) {
+            if constexpr (simple_swap) {
+                std::ranges::swap((allocator_type&)*this, (allocator_type&)other);
+                this->do_swap_states(other);
+            } else {
+                const bool allocator_equal = this->get_allocator() == other.get_allocator();
+                const bool both_not_allocated = !this->allocated() && !other.allocated();
+                if (allocator_equal || both_not_allocated) {
+                    this->do_swap_states(other);
+                } else {
+                    // According to standard container requirement, this is undefined behavior.
+                    // But we will make it well-defined for cow_string.
+                    basic_cow_string original = *this; // share with source
+                    *this = other.view(); // may throw, but strong-guaranteed
+                    try {
+                        other = original.view();
+                    } catch (...) {
+                        // Strong guarantee
+                        // Assign from view is strong-guaranteed itself,
+                        // so only the first one may need to rollback.
+                        this->do_swap_states(original);
+                        throw;
+                    }
+                }
+            }
+        }
+
+        friend constexpr void swap(basic_cow_string& lhs, basic_cow_string& rhs)
+            noexcept(noexcept(lhs.swap(rhs))) {
+            lhs.swap(rhs);
         }
 
         constexpr basic_cow_string& assign(std::nullptr_t) = delete;
         constexpr basic_cow_string& operator=(std::nullptr_t) = delete;
 
-        constexpr basic_cow_string& assign(const basic_cow_string& other) noexcept {
-            basic_cow_string(other).swap(*this);
+        constexpr basic_cow_string& assign(const basic_cow_string& other)
+            noexcept(simple_copy || simple_swap) {
+            if constexpr (simple_swap) {
+                basic_cow_string(other).swap(*this);
+            } else if constexpr (simple_copy) {
+                if (this != &other) {
+                    deallocate_if_needed();
+                    ((allocator_type&)*this) = other.allocator_copy();
+                    set_states_on_copy(other);
+                }
+            } else {
+                if (this != &other) {
+                    if (this->get_allocator() == other.get_allocator()) {
+                        set_states_on_copy(other);
+                    } else {
+                        // Can not share with source, do deep copy
+                        *this = other.view(); // may throw, but strong-guaranteed
+                    }
+                }
+            }
             return *this;
         }
 
-        constexpr basic_cow_string& operator=(const basic_cow_string& other) noexcept {
+        constexpr basic_cow_string& operator=(const basic_cow_string& other)
+            noexcept(noexcept(this->assign(other))) {
             return assign(other);
         }
 
-        constexpr basic_cow_string& assign(basic_cow_string&& other) noexcept {
-            basic_cow_string(std::move(other)).swap(*this);
+        constexpr basic_cow_string& assign(basic_cow_string&& other)
+            noexcept(simple_swap || simple_move) {
+            if constexpr (simple_swap) {
+                basic_cow_string(std::move(other)).swap(*this);
+            } else if constexpr (simple_move) {
+                if (this != &other) {
+                    deallocate_if_needed();
+                    ((allocator_type&)*this) = std::move(other).allocator_move();
+                    set_states_on_move(std::move(other));
+                }
+            } else {
+                if (this != &other) {
+                    if (this->get_allocator() == other.get_allocator()) {
+                        set_states_on_move(std::move(other));
+                    } else {
+                        // Can not share with source, do deep copy
+                        *this = other.view(); // may throw, but strong-guaranteed
+                    }
+                }
+            }
             return *this;
         }
 
-        constexpr basic_cow_string& operator=(basic_cow_string&& other) noexcept {
+        constexpr basic_cow_string& operator=(basic_cow_string&& other)
+            noexcept(noexcept(this->assign(std::move(other)))) {
             return assign(std::move(other));
         }
 
@@ -1079,6 +1139,60 @@ namespace mylib {
         }
 
     private:
+        constexpr allocator_type allocator_copy() const & noexcept {
+            if constexpr (is_always_equal) {
+                return allocator_type();
+            } else {
+                return allocator_traits_type::select_on_container_copy_construction(
+                    this->get_allocator()
+                );
+            }
+        }
+
+        constexpr allocator_type allocator_move() && noexcept {
+            if constexpr (is_always_equal) {
+                return allocator_type();
+            } else {
+                return std::move(this->get_allocator());
+            }
+        }
+
+        constexpr void copy_non_allocated_states(const basic_cow_string& other) noexcept {
+            using storage = details::storage_block<char_type>;
+            (storage&)(*this) = (const storage&)(other);
+        }
+
+        constexpr void set_states_on_copy(const basic_cow_string& other) noexcept {
+            if (other.allocated()) {
+                // owned or shared string
+                // share with source
+                other.control |= 0b01; // mark as shared
+                this->control = other.control;
+                this->storage.non_sso = other.storage.non_sso;
+                control_block()->reference_counter.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                copy_non_allocated_states(other);
+            }
+        }
+
+        constexpr void set_states_on_move(basic_cow_string&& other) noexcept {
+            if (other.allocated()) {
+                // owned or shared string
+                // steal from source and set it to sso empty string
+                this->control = other.control;
+                this->storage.non_sso = other.storage.non_sso;
+                other.control = 0;
+                other.storage.small[0] = char_type();
+            } else {
+                copy_non_allocated_states(other);
+            }
+        }
+
+        constexpr void do_swap_states(basic_cow_string& other) noexcept {
+            using storage = details::storage_block<char_type>;
+            std::ranges::swap((storage&)(*this), (storage&)other);
+        }
+
         details::cow_string_control_block* control_block() const noexcept {
             return reinterpret_cast<details::cow_string_control_block*>(this->control & ~this->control_mask);
         }
@@ -1124,7 +1238,7 @@ namespace mylib {
         constexpr char_type* reserve_or_exclusive_shrink(const size_type new_cap) {
             // Get new buffer if is shared with other strings or holds literal.
             // In this case, new buffer always have capacity of new_cap regardless of current capacity.
-            // Tail contents are discarded if new_cap < size().
+            // Tail contents are discarded if new_cap < size() here. (The 'exclusive shrink' branch)
             if (!unique()) {
                 if (new_cap > this->sso_capacity) {
                     return allocate_exclusive_buffer(view(), new_cap);
@@ -1134,13 +1248,16 @@ namespace mylib {
             } else {
                 const size_type old_cap = capacity();
                 if (new_cap > old_cap) {
+                    // The auto growing branch
                     return allocate_exclusive_buffer(view(), std::ranges::max(new_cap, old_cap * 2));
                 } else {
                     if (allocated() && allocated_data() != std::as_const(*this).allocated_data()) {
-                        // alias string
-                        // move contents to front to ensure full capacity is available
+                        // Alias string
+                        // Move contents to front to ensure full capacity is available.
                         return write_allocated_buffer(view());
                     } else {
+                        // Already exclusive, having enough capacity, and no need to reposition contents.
+                        // Nothing to do here.
                         return data_unsafe();
                     }
                 }

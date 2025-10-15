@@ -130,8 +130,7 @@ namespace mylib {
         // On move:
         //  Things are basically the same as copy.
         // On swap:
-        //  Things are basically the same as copy, but if deep copy is needed, we have to
-        //  allocate a temporary buffer and copy 3 times.
+        //  Things are basically the same as copy, but deep copy twice.
         template<typename AllocatorTraits>
         struct cow_string_allocator_propagate_traits {
             static constexpr bool is_always_equal = AllocatorTraits::is_always_equal::value;
@@ -216,22 +215,22 @@ namespace mylib {
         }
 
         constexpr basic_cow_string(const basic_cow_string& other,
-            const size_type pos, const size_type count) noexcept
+            const size_type pos, const size_type count)
             : basic_cow_string(other.substr(pos, count))
         {}
 
         constexpr basic_cow_string(const basic_cow_string& other,
-            const size_type pos) noexcept
+            const size_type pos)
             : basic_cow_string(other, pos, npos)
         {}
 
         constexpr basic_cow_string(basic_cow_string&& other,
-            const size_type pos, const size_type count) noexcept
+            const size_type pos, const size_type count)
             : basic_cow_string(std::move(other).substr(pos, count))
         {}
 
         constexpr basic_cow_string(basic_cow_string&& other,
-            const size_type pos) noexcept
+            const size_type pos)
             : basic_cow_string(std::move(other), pos, npos)
         {}
 
@@ -266,7 +265,6 @@ namespace mylib {
         }
 
         template<std::convertible_to<string_view_type> StringViewLike>
-            requires (!std::is_array_v<std::remove_cvref_t<StringViewLike>>)
         constexpr basic_cow_string(const StringViewLike& sv,
             const size_type pos, const size_type count,
             const allocator_type& alloc = allocator_type())
@@ -274,7 +272,6 @@ namespace mylib {
         {}
 
         template<std::convertible_to<string_view_type> StringViewLike>
-            requires (!std::is_array_v<std::remove_cvref_t<StringViewLike>>)
         constexpr basic_cow_string(const StringViewLike& sv,
             const size_type pos,
             const allocator_type& alloc = allocator_type())
@@ -366,36 +363,10 @@ namespace mylib {
 
         constexpr string_type string() const { return string_type(view()); }
         constexpr operator string_view_type() const noexcept { return view(); }
+        constexpr basic_cow_string clone() const { return { view(), this->allocator_copy() }; }
 
         constexpr const allocator_type& get_allocator() const noexcept {
             return static_cast<const allocator_type&>(*this);
-        }
-
-        constexpr basic_cow_string substr(
-            const size_type pos = 0, const size_type count = npos) const & noexcept {
-            return auto(*this).substr(pos, count);
-        }
-
-        constexpr basic_cow_string substr(
-            const size_type pos = 0, const size_type count = npos) && noexcept {
-            basic_cow_string copy = std::move(*this);
-            const size_type original_size = copy.size();
-            const size_type size = std::ranges::min(count, original_size - pos);
-            [[assume(pos <= original_size)]];
-            if (copy.allocated() || copy.shared()) {
-                // literal or shared string
-                copy.storage.non_sso.size = size;
-                copy.storage.non_sso.data += pos;
-            } else {
-                // small string
-                if (pos > 0) {
-                    std::ranges::copy_n(copy.storage.small + pos, size,
-                        copy.storage.small);
-                }
-                copy.storage.small[size] = char_type();
-                copy.control = size << 2;
-            }
-            return copy;
         }
 
         constexpr string_view_type subview(
@@ -685,7 +656,7 @@ namespace mylib {
         }
 
         constexpr basic_cow_string& assign(std::initializer_list<char_type> il) {
-            return assign(il.begin(), il.end());
+            return assign(string_view_type(il));
         }
 
         constexpr basic_cow_string& operator=(std::initializer_list<char_type> il) {
@@ -696,7 +667,7 @@ namespace mylib {
             requires details::eligible_iter_and_sent<Iter, Sent, char_type>
         constexpr basic_cow_string& assign(Iter&& iter, Sent&& sent) {
             if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
-                basic_cow_string(std::forward<Iter>(iter), std::forward<Sent>(sent), get_allocator())
+                basic_cow_string(std::forward<Iter>(iter), std::forward<Sent>(sent), allocator_copy())
                     .swap(*this);
             } else {
                 clear();
@@ -705,6 +676,9 @@ namespace mylib {
         }
 
         constexpr basic_cow_string& assign(size_type count, const char_type ch) {
+            if (count <= capacity()) {
+                clear();
+            }
             resize(count, ch);
             return *this;
         }
@@ -729,6 +703,34 @@ namespace mylib {
         constexpr basic_cow_string& assign_range(R&& r) {
             auto rg = std::forward<R>(r);
             return assign(std::ranges::begin(rg), std::ranges::end(rg));
+        }
+
+        constexpr basic_cow_string substr(
+            const size_type pos = 0, const size_type count = npos) const & {
+            return basic_cow_string(view(), pos, count, allocator_copy());
+        }
+
+        constexpr basic_cow_string substr(
+            const size_type pos = 0, const size_type count = npos) && {
+            const size_type original_size = size();
+            [[assume(pos <= original_size)]];
+            if (pos == 0 && count >= original_size) {
+                return std::move(*this);
+            } else if (unique()) {
+                if (pos > 0) {
+                    const string_view_type sub = subview(pos, count);
+                    if (shared()) {
+                        write_allocated_buffer(sub);
+                    } else {
+                        write_sso_buffer(sub);
+                    }
+                } else if (count < original_size) {
+                    resize(count);
+                }
+                return std::move(*this);
+            } else {
+                return std::as_const(*this).substr(pos, count);
+            }
         }
 
         constexpr void push_back(const char_type ch) {
@@ -801,7 +803,7 @@ namespace mylib {
         }
 
         constexpr basic_cow_string& append(std::initializer_list<char_type> il) {
-            return append(il.begin(), il.end());
+            return append(string_view_type(il));
         }
 
         template<details::container_compatible_range<char_type> R>
@@ -811,9 +813,8 @@ namespace mylib {
             return append(std::ranges::begin(rg), std::ranges::end(rg));
         }
 
-        template<std::convertible_to<string_view_type> StringViewLike>
-        constexpr basic_cow_string& operator+=(const StringViewLike& sv) {
-            return append(string_view_type(sv));
+        constexpr basic_cow_string& operator+=(const string_view_type sv) {
+            return append(sv);
         }
 
         constexpr basic_cow_string& operator+=(const char_type ch) {
@@ -1144,7 +1145,7 @@ namespace mylib {
                 return allocator_type();
             } else {
                 return allocator_traits_type::select_on_container_copy_construction(
-                    this->get_allocator()
+                    get_allocator()
                 );
             }
         }
@@ -1153,7 +1154,7 @@ namespace mylib {
             if constexpr (is_always_equal) {
                 return allocator_type();
             } else {
-                return std::move(this->get_allocator());
+                return std::move((allocator_type&)*this);
             }
         }
 
@@ -1243,7 +1244,7 @@ namespace mylib {
                 if (new_cap > this->sso_capacity) {
                     return allocate_exclusive_buffer(view(), new_cap);
                 } else {
-                    return write_sso_buffer(view().substr(0, new_cap));
+                    return write_sso_buffer(subview(0, new_cap));
                 }
             } else {
                 const size_type old_cap = capacity();
@@ -1251,15 +1252,9 @@ namespace mylib {
                     // The auto growing branch
                     return allocate_exclusive_buffer(view(), std::ranges::max(new_cap, old_cap * 2));
                 } else {
-                    if (allocated() && allocated_data() != std::as_const(*this).allocated_data()) {
-                        // Alias string
-                        // Move contents to front to ensure full capacity is available.
-                        return write_allocated_buffer(view());
-                    } else {
-                        // Already exclusive, having enough capacity, and no need to reposition contents.
-                        // Nothing to do here.
-                        return data_unsafe();
-                    }
+                    // Already exclusive and having enough capacity
+                    // Nothing to do here.
+                    return data_unsafe();
                 }
             }
         }

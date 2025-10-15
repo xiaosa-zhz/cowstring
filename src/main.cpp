@@ -20,6 +20,7 @@ int main() {
     std::println("{} {}", str2, str2.is_owned());
     str.replace(str.find(cow), cow.size(), long_cow);
     std::println("{} {}", str, str.is_owned());
+    std::println("{}", str.substr(0, 14));
     const char* goodbye = "Goodbye!";
     str2 = goodbye;
     std::println("{} {}", str2, str2.is_owned());

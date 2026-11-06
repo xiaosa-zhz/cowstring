@@ -3,6 +3,7 @@
 
 #define MYLIB_COW_STRING_TEST_STATUS
 #include "cowstring.hpp"
+#include "cowstring2.hpp"
 
 int main() {
     using namespace mylib::literals;
@@ -27,4 +28,11 @@ int main() {
     mylib::cow_string str3 = str2;
     str3.shrink_to_fit();
     std::println("{} {}", str3, str3.is_sso());
+    cow::cow_string _;
+    std::println("{} {} {} {} {}",
+        sizeof(cow::cow_string),
+        sizeof(cow::cow_wstring),
+        sizeof(cow::cow_u8string),
+        sizeof(cow::cow_u16string),
+        sizeof(cow::cow_u32string));
 }

@@ -3,18 +3,15 @@
 #define MYLIB_COW_STRING2_H 1
 
 #include <cstddef>
-#include <cstdint>
 #include <concepts>
 #include <type_traits>
 #include <meta>
 #include <climits>
-#include <new>
 #include <utility>
 #include <iterator>
 #include <string>
 #include <string_view>
 #include <memory>
-#include <format>
 #include <atomic>
 #include <bit>
 #include <algorithm>
@@ -131,7 +128,9 @@ union storage {
     }
 
     // There is no writable string during compile time
-    CharT* data() noexcept {
+    CharT* data() noexcept
+        pre (!status().shared)
+    {
         return visit([](auto& s) -> CharT* { return s.data; });
     }
 
@@ -405,6 +404,12 @@ private:
 
     char_type* exclusive_data() { return reserve_or_exclusive_shrink(size()); }
 
+    void check_index(size_type index) const {
+        if (index >= size()) {
+            throw std::out_of_range("basic_cow_string: out of range");
+        }
+    }
+
 public:
     constexpr explicit basic_cow_string(const allocator_type& alloc) noexcept
         : allocator_type(alloc)
@@ -545,6 +550,23 @@ public:
 
     // Non-modifying methods
 
+#ifdef MYLIB_COW_STRING_TEST_STATUS
+
+    // For testing purposes only
+    constexpr bool is_small() const noexcept { return status() == details::small; }
+    // For testing purposes only
+    constexpr bool is_literal() const noexcept { return status() == details::literal; }
+    // For testing purposes only
+    constexpr bool is_owned() const noexcept { return status() == details::owned; }
+    // For testing purposes only
+    // Note that this only checks local status, not reference counter
+    constexpr bool is_shared() const noexcept { return status() == details::shared; }
+    // For testing purposes only
+    // Maybe inaccurate in concurrent scenarios
+    std::size_t cur_count() const noexcept { return ref_count().load(std::memory_order_relaxed); }
+
+#endif // MYLIB_COW_STRING_TEST_STATUS
+
     // Check if writing ops would require sso-filling/allocation first
     constexpr bool exclusive() const noexcept {
         const auto s = status();
@@ -584,10 +606,8 @@ public:
     constexpr const_reference operator[](size_type pos) const noexcept pre (pos < size()) { return view()[pos]; }
 
     constexpr const_reference at(size_type pos) const {
-        if (pos < size()) {
-            return view()[pos];
-        }
-        throw std::out_of_range("basic_cow_string::at: position out of range");
+        check_index(pos);
+        return view()[pos];
     }
 
     constexpr size_type find(string_view_type str, size_type pos = 0) const noexcept {
@@ -929,24 +949,32 @@ public:
         }
     }
 
-    pointer data() { return exclusive_data(); }
-    iterator begin() { return data(); }
-    iterator end() { return data() + size(); }
-    reverse_iterator rbegin() { return reverse_iterator(end()); }
-    reverse_iterator rend() { return reverse_iterator(begin()); }
-    reference front() pre (!empty()) { return exclusive_data()[0]; }
-    reference back() pre (!empty()) { return exclusive_data()[size() - 1]; }
-    reference operator[](size_type pos) pre (pos < size()) { return exclusive_data()[pos]; }
+    pointer data() post (exclusive()) { return exclusive_data(); }
+    iterator begin() post (exclusive()) { return data(); }
+    iterator end() post (exclusive()) { return data() + size(); }
+    reverse_iterator rbegin() post (exclusive()) { return reverse_iterator(end()); }
+    reverse_iterator rend() post (exclusive()) { return reverse_iterator(begin()); }
+    reference front() pre (!empty()) post (exclusive()) { return exclusive_data()[0]; }
+    reference back() pre (!empty()) post (exclusive()) { return exclusive_data()[size() - 1]; }
+
+    reference operator[](size_type pos)
+        pre (pos < size())
+        post (exclusive())
+    {
+        return exclusive_data()[pos];
+    }
     
-    reference at(size_type pos) {
-        if (pos < size()) {
-            return exclusive_data()[pos];
-        }
-        throw std::out_of_range("basic_cow_string::at: position out of range");
+    reference at(size_type pos)
+        post (exclusive())
+    {
+        check_index(pos);
+        return exclusive_data()[pos];
     }
 
     template<std::invocable<char_type*, size_type> Operation>
-    void resize_and_overwrite(size_type count, Operation op) {
+    void resize_and_overwrite(size_type count, Operation op)
+        post (exclusive())
+    {
         // get necessary storage
         char_type* const p = reserve_or_exclusive_shrink(count);
         // now exclusive
@@ -960,7 +988,9 @@ public:
         p[r] = char_type();
     }
 
-    void resize(size_type new_size, char_type ch = char_type()) {
+    void resize(size_type new_size, char_type ch = char_type())
+        post (exclusive())
+    {
         const size_type old_size = size();
         resize_and_overwrite(new_size,
             [ch, old_size](char_type* p, size_type count) noexcept {
@@ -971,7 +1001,9 @@ public:
         });
     }
 
-    void push_back(char_type ch) {
+    void push_back(char_type ch)
+        post (exclusive())
+    {
         const size_type old_size = size();
         resize_and_overwrite(old_size + 1,
             [ch, old_size](char_type* p, size_type count) noexcept {
@@ -980,14 +1012,18 @@ public:
         });
     }
 
-    void pop_back() pre (!empty()) { resize(size() - 1); }
-
-    basic_cow_string& append(size_type count, char_type ch) {
+    void pop_back() pre (!empty()) post (exclusive()) { resize(size() - 1); }
+    
+    basic_cow_string& append(size_type count, char_type ch)
+        post (exclusive())
+    {
         resize(size() + count, ch);
         return *this;
     }
 
-    basic_cow_string& append(string_view_type sv, size_type pos, size_type count = npos) {
+    basic_cow_string& append(string_view_type sv, size_type pos, size_type count = npos)
+        post (exclusive())
+    {
         const string_view_type view = string_view_type(sv).substr(pos, count);
         const size_type old_size = size();
         const size_type add_size = view.size();
@@ -999,17 +1035,23 @@ public:
         return *this;
     }
 
-    basic_cow_string& append(string_view_type sv) {
+    basic_cow_string& append(string_view_type sv)
+        post (exclusive())
+    {
         return append(sv, 0, npos);
     }
 
-    basic_cow_string& append(const char_type* s, size_type count) {
+    basic_cow_string& append(const char_type* s, size_type count)
+        post (exclusive())
+    {
         return append(string_view_type(s, count));
     }
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    basic_cow_string& append(Iter&& iter, Sent&& sent) {
+    basic_cow_string& append(Iter&& iter, Sent&& sent)
+        post (exclusive())
+    {
         const size_type old_size = size();
         auto i = std::forward<Iter>(iter);
         auto s = std::forward<Sent>(sent);
@@ -1031,28 +1073,373 @@ public:
         return *this;
     }
 
-    basic_cow_string& append(std::initializer_list<char_type> il) {
+    basic_cow_string& append(std::initializer_list<char_type> il)
+        post (exclusive())
+    {
         return append(string_view_type(il));
     }
 
     template<details::container_compatible_range<char_type> R>
-    basic_cow_string& append_range(R&& r) {
+    basic_cow_string& append_range(R&& r)
+        post (exclusive())
+    {
         auto rg = std::forward<R>(r);
         // TODO: add approximately_sized_range branch when supported
         return append(std::ranges::begin(rg), std::ranges::end(rg));
     }
 
-    basic_cow_string& operator+=(string_view_type sv) {
+    basic_cow_string& operator+=(string_view_type sv)
+        post (exclusive())
+    {
         return append(sv);
     }
 
-    basic_cow_string& operator+=(const char_type ch) {
+    basic_cow_string& operator+=(char_type ch)
+        post (exclusive())
+    {
         push_back(ch);
         return *this;
     }
 
-    basic_cow_string& operator+=(std::initializer_list<char_type> il) {
+    basic_cow_string& operator+=(std::initializer_list<char_type> il)
+        post (exclusive())
+    {
         return append(il);
+    }
+
+    basic_cow_string& insert(size_type index, size_type count, char_type ch)
+        post (exclusive())
+    {
+        check_index(index);
+        const size_type old_size = size();
+        resize_and_overwrite(old_size + count,
+            [index, count, ch, old_size](char_type* p, size_type new_size) noexcept {
+            std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+            std::ranges::fill_n(p + index, count, ch);
+            return new_size;
+        });
+        return *this;
+    }
+
+    basic_cow_string& insert(size_type index, char_type ch)
+        post (exclusive())
+    {
+        return insert(index, 1, ch);
+    }
+
+    basic_cow_string& insert(size_type index, string_view_type str)
+        post (exclusive())
+    {
+        check_index(index);
+        const size_type old_size = size();
+        const size_type add_size = str.size();
+        resize_and_overwrite(old_size + add_size,
+            [index, add_size, str, old_size](char_type* p, size_type new_size) noexcept {
+            std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+            std::ranges::copy_n(str.data(), add_size, p + index, p + new_size);
+            return new_size;
+        });
+        return *this;
+    }
+
+    basic_cow_string& insert(size_type index, const char_type* s, size_type count)
+        post (exclusive())
+    {
+        return insert(index, string_view_type(s, count));
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    basic_cow_string& insert(size_type index, Iter&& iter, Sent&& sent)
+        post (exclusive())
+    {
+        check_index(index);
+        const size_type old_size = size();
+        auto i = std::forward<Iter>(iter);
+        auto s = std::forward<Sent>(sent);
+        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
+            // push_back fallback
+            basic_cow_string temp = substr(0, index);
+            try {
+                for (; i != s; ++i) {
+                    temp.push_back(*i);
+                }
+            } catch (...) {
+                throw;
+            }
+            temp.append(subview(index, npos));
+            swap(temp);
+        } else {
+            const size_type add_size = std::ranges::distance(i, s);
+            resize_and_overwrite(old_size + add_size,
+                [index, add_size, old_size, &i](char_type* p, size_type new_size) noexcept {
+                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+                std::ranges::copy_n(i, add_size, p + index);
+                return new_size;
+            });
+        }
+        return *this;
+    }
+
+    basic_cow_string& insert(size_type index, std::initializer_list<char_type> il)
+        post (exclusive())
+    {
+        return insert(index, il.begin(), il.end());
+    }
+
+    iterator insert(const_iterator pos, size_type count, char_type ch)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        const size_type index = pos - cbegin();
+        insert(index, count, ch);
+        return begin() + index;
+    }
+
+    iterator insert(const_iterator pos, char_type ch)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        return insert(pos, 1, ch);
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    iterator insert(const_iterator pos, Iter&& iter, Sent&& sent)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        const size_type index = pos - cbegin();
+        insert(index, std::forward<Iter>(iter), std::forward<Sent>(sent));
+        return begin() + index;
+    }
+
+    iterator insert(const_iterator pos, std::initializer_list<char_type> il)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        return insert(pos, il.begin(), il.end());
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    iterator insert_range(const_iterator pos, R&& r)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        auto rg = std::forward<R>(r);
+        return insert(pos, std::ranges::begin(rg), std::ranges::end(rg));
+    }
+
+    basic_cow_string& erase(size_type index = 0, size_type count = npos)
+        post (exclusive())
+    {
+        check_index(index);
+        const size_type old_size = size();
+        if (old_size - index <= count) {
+            resize(index);
+            return *this;
+        }
+        char_type* const data = exclusive_data();
+        std::ranges::copy(data + index + count, data + old_size, data + index);
+        resize(old_size - count);
+        return *this;
+    }
+
+    iterator erase(const_iterator pos)
+        pre (cbegin() <= pos && pos < cend())
+        post (exclusive())
+    {
+        const size_type index = pos - cbegin();
+        erase(index, 1);
+        return begin() + index;
+    }
+
+    iterator erase(const_iterator first, const_iterator last)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        erase(index, count);
+        return begin() + index;
+    }
+
+    basic_cow_string& replace(size_type pos, size_type count, string_view_type str)
+        post (exclusive())
+    {
+        check_index(pos);
+        const size_type old_size = size();
+        if (old_size - pos <= count) {
+            resize(pos);
+            return append(str);
+        }
+        const size_type rcount = std::ranges::min(count, old_size - pos);
+        const size_type add_size = str.size();
+        const size_type new_size = old_size - rcount + add_size;
+        if (new_size > old_size) {
+            resize(new_size);
+            char_type* const data = storage.data();
+            std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+            std::ranges::copy_n(str.data(), add_size, data + pos);
+        } else {
+            char_type* const data = exclusive_data();
+            std::ranges::copy_n(str.data(), add_size, data + pos);
+            std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+            resize(new_size);
+        }
+        return *this;
+    }
+
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+        const string_view_type str)
+        post (exclusive())
+    {
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, str);
+    }
+
+    basic_cow_string& replace(const size_type pos, const size_type count,
+        const char_type* cstr, const size_type count2)
+        post (exclusive())
+    {
+        return replace(pos, count, string_view_type(cstr, count2));
+    }
+
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+        const char_type* cstr, size_type count2)
+        post (exclusive())
+    {
+        return replace(first, last, string_view_type(cstr, count2));
+    }
+
+    basic_cow_string& replace(size_type pos, size_type count,
+                              size_type count2, char_type ch)
+        post (exclusive())
+    {
+        check_index(pos);
+        const size_type old_size = size();
+        if (old_size - pos <= count) {
+            resize(pos);
+            return append(count2, ch);
+        }
+        const size_type rcount = std::ranges::min(count, old_size - pos);
+        const size_type add_size = count2;
+        const size_type new_size = old_size - rcount + add_size;
+        if (new_size > old_size) {
+            resize(new_size);
+            char_type* const data = storage.data();
+            std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+            std::ranges::fill_n(data + pos, add_size, ch);
+        } else {
+            char_type* const data = exclusive_data();
+            std::ranges::fill_n(data + pos, add_size, ch);
+            std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+            resize(new_size);
+        }
+        return *this;
+    }
+    
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+                              size_type count2, char_type ch)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, count2, ch);
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    basic_cow_string& replace(size_type pos, size_type count,
+                              Iter&& iter, Sent&& sent)
+        post (exclusive())
+    {
+        check_index(pos);
+        const size_type old_size = size();
+        auto i = std::forward<Iter>(iter);
+        [[maybe_unused]]
+        auto s = std::forward<Sent>(sent);
+        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
+            // push_back fallback
+            basic_cow_string temp = substr(0, pos);
+            try {
+                for (; i != s; ++i) {
+                    temp.push_back(*i);
+                }
+            } catch (...) {
+                throw;
+            }
+            if (old_size - pos > count) {
+                temp.append(subview(pos + count, npos));
+            }
+            swap(temp);
+        } else {
+            if (old_size - pos <= count) {
+                resize(pos);
+                return append(std::forward<Iter>(i), std::forward<Sent>(s));
+            }
+            const size_type rcount = std::ranges::min(count, old_size - pos);
+            const size_type add_size = std::ranges::distance(i, s);
+            const size_type new_size = old_size - rcount + add_size;
+            if (new_size > old_size) {
+                resize(new_size);
+                char_type* const data = storage.data();
+                std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+                std::ranges::move(i, s, data + pos);
+            } else {
+                char_type* const data = exclusive_data();
+                std::ranges::move(i, s, data + pos);
+                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+                resize(new_size);
+            }
+        }
+        return *this;
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+                              Iter&& iter, Sent&& sent)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, std::forward<Iter>(iter), std::forward<Sent>(sent));
+    }
+
+    basic_cow_string& replace(size_type pos, size_type count,
+                              std::initializer_list<char_type> il)
+        post (exclusive())
+    {
+        return replace(pos, count, il.begin(), il.end());
+    }
+
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+                              std::initializer_list<char_type> il)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        return replace(first, last, il.begin(), il.end());
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    basic_cow_string& replace_with_range(size_type pos, size_type count, R&& r)
+        post (exclusive())
+    {
+        auto rg = std::forward<R>(r);
+        return replace(pos, count, std::ranges::begin(rg), std::ranges::end(rg));
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    basic_cow_string& replace_with_range(const_iterator first, const_iterator last, R&& r)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        auto rg = std::forward<R>(r);
+        return replace(first, last, std::ranges::begin(rg), std::ranges::end(rg));
     }
 
 private:

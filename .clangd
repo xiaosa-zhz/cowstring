@@ -1,0 +1,8 @@
+CompileFlags:
+  Remove:
+    - -fcontracts
+    - -freflection
+  Add:
+    - '-Dpre(...)='
+    - '-Dpost(...)='
+    - '-Dcontract_assert(...)='

@@ -336,7 +336,7 @@ namespace mylib {
         constexpr size_type length() const noexcept { return size(); }
         constexpr bool empty() const noexcept { return size() == 0; }
 
-        constexpr bool unique() const noexcept {
+        constexpr bool exclusive() const noexcept {
             if (!shared() || !allocated()) {
                 return true;
             } else {
@@ -521,7 +521,7 @@ namespace mylib {
                     // move to sso
                     write_sso_buffer(view());
                     deallocate_if_needed();
-                } else if (!unique() || size() < capacity()) {
+                } else if (!exclusive() || size() < capacity()) {
                     // reallocate to smaller buffer
                     allocate_exclusive_buffer(view());
                 }
@@ -716,7 +716,7 @@ namespace mylib {
             [[assume(pos <= original_size)]];
             if (pos == 0 && count >= original_size) {
                 return std::move(*this);
-            } else if (unique()) {
+            } else if (exclusive()) {
                 if (pos > 0) {
                     const string_view_type sub = subview(pos, count);
                     if (shared()) {
@@ -826,7 +826,7 @@ namespace mylib {
             return append(il);
         }
 
-        constexpr char_type* data() noexcept { return exclusive(); }
+        constexpr char_type* data() noexcept { return exclusive_data(); }
         constexpr iterator begin() noexcept { return data(); }
         constexpr iterator end() noexcept { return data() + size(); }
         constexpr reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
@@ -835,26 +835,26 @@ namespace mylib {
         constexpr char_type& front() noexcept {
             const size_type sz = size();
             [[assume(sz > 0)]];
-            return exclusive()[0];
+            return exclusive_data()[0];
         }
 
         constexpr char_type& back() noexcept {
             const size_type sz = size();
             [[assume(sz > 0)]];
-            return exclusive()[sz - 1];
+            return exclusive_data()[sz - 1];
         }
 
         constexpr char_type& operator[](const size_type pos) noexcept {
             const size_type sz = size();
             [[assume(pos < sz)]];
-            return exclusive()[pos];
+            return exclusive_data()[pos];
         }
 
         constexpr char_type& at(const size_type pos) {
             if (pos >= size()) {
                 throw std::out_of_range("basic_cow_string::at: position out of range");
             }
-            return exclusive()[pos];
+            return exclusive_data()[pos];
         }
 
         constexpr basic_cow_string& insert(const size_type index,
@@ -967,7 +967,7 @@ namespace mylib {
                 resize(index);
                 return *this;
             }
-            char_type* const data = exclusive();
+            char_type* const data = exclusive_data();
             std::ranges::copy(data + index + count, data + old_size, data + index);
             resize(old_size - count);
             return *this;
@@ -1003,7 +1003,7 @@ namespace mylib {
                 std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
                 std::ranges::copy_n(str.data(), add_size, data + pos);
             } else {
-                char_type* const data = exclusive();
+                char_type* const data = exclusive_data();
                 std::ranges::copy_n(str.data(), add_size, data + pos);
                 std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
                 resize(new_size);
@@ -1045,7 +1045,7 @@ namespace mylib {
                 std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
                 std::ranges::fill_n(data + pos, add_size, ch);
             } else {
-                char_type* const data = exclusive();
+                char_type* const data = exclusive_data();
                 std::ranges::fill_n(data + pos, add_size, ch);
                 std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
                 resize(new_size);
@@ -1097,7 +1097,7 @@ namespace mylib {
                     std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
                     std::ranges::move(i, s, data + pos);
                 } else {
-                    char_type* const data = exclusive();
+                    char_type* const data = exclusive_data();
                     std::ranges::move(i, s, data + pos);
                     std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
                     resize(new_size);
@@ -1240,7 +1240,7 @@ namespace mylib {
             // Get new buffer if is shared with other strings or holds literal.
             // In this case, new buffer always have capacity of new_cap regardless of current capacity.
             // Tail contents are discarded if new_cap < size() here. (The 'exclusive shrink' branch)
-            if (!unique()) {
+            if (!exclusive()) {
                 if (new_cap > this->sso_capacity) {
                     return allocate_exclusive_buffer(view(), new_cap);
                 } else {
@@ -1259,7 +1259,7 @@ namespace mylib {
             }
         }
 
-        constexpr char_type* exclusive() { return reserve_or_exclusive_shrink(size()); }
+        constexpr char_type* exclusive_data() { return reserve_or_exclusive_shrink(size()); }
 
         constexpr char_type* write_sso_buffer(const string_view_type str) noexcept {
             const std::size_t size = str.size();

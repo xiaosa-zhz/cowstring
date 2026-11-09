@@ -18,7 +18,7 @@
 #include <initializer_list>
 #include <ranges>
 #include <functional>
-#include <limits>
+#include <numeric>
 
 namespace cow {
 
@@ -428,7 +428,8 @@ private:
             const size_type old_cap = capacity();
             if (new_cap > old_cap) {
                 // The auto growing branch
-                return allocate_exclusive_buffer(view(), std::ranges::max(new_cap, old_cap * 2));
+                const size_type growing = std::saturating_mul(old_cap, size_type(2));
+                return allocate_exclusive_buffer(view(), std::ranges::max(new_cap, growing));
             } else {
                 // Already exclusive and having enough capacity
                 // Nothing to do here.

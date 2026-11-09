@@ -54,6 +54,7 @@ target("cowstring")
     set_runtimes("stdc++_shared")
     add_cxxflags("-freflection", {force = true})
     add_cxxflags("-fcontracts", {force = true})
+    add_ldflags("-fcontracts", {force = true})
     add_linkdirs("/usr/local/lib/x86_64-unknown-linux-gnu")
     add_rpathdirs("/usr/local/lib/x86_64-unknown-linux-gnu")
 

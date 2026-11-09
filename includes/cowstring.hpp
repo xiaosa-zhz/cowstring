@@ -2,728 +2,745 @@
 #ifndef MYLIB_COW_STRING_H
 #define MYLIB_COW_STRING_H 1
 
+#include <cstddef>
 #include <concepts>
 #include <type_traits>
-#include <cstddef>
-#include <cstdint>
+#include <meta>
+#include <climits>
 #include <utility>
 #include <iterator>
 #include <string>
 #include <string_view>
 #include <memory>
-#include <format>
 #include <atomic>
-#include <new>
+#include <bit>
 #include <algorithm>
 #include <initializer_list>
 #include <ranges>
 
-namespace mylib {
+namespace cow {
 
-    // Forward declaration
-    template<typename CharT, typename Allocator>
-    class basic_cow_string;
+namespace details {
 
-    namespace details {
+template<typename CharT>
+inline constexpr bool is_valid_char_type = 
+    std::is_same_v<CharT, char>
+ || std::is_same_v<CharT, wchar_t>
+ || std::is_same_v<CharT, char8_t>
+ || std::is_same_v<CharT, char16_t>
+ || std::is_same_v<CharT, char32_t>;
 
-        // cow string has 4 states, distinguished by low 2 bits of control
-        // 1. small string: control bits are 00 and higher bits of control is size
-        // 2. literal string: control bits are 01
-        // 3. owned string: control bits are 10 and higher bits of control is pointer to control block
-        // 4. shared string: control bits are 11 and higher bits of control is pointer to control block
-        template<typename CharT>
-        struct storage_block
-        {
-            using char_type = CharT;
+template<typename CharT, typename SizeT>
+struct dyn_string {
+    CharT* data = nullptr;
+    SizeT size = 0;
+    SizeT capacity : (sizeof(SizeT) * CHAR_BIT - 2) = 0;
+    mutable SizeT shared : 1 = 0;
+    SizeT allocated : 1 = 1;
+};
 
-            struct non_sso_string {
-                std::uint64_t size;
-                std::uint64_t capacity;
-                const char_type* data;
-            };
+template<typename CharT, typename SizeT>
+struct sta_string {
+    const CharT* data = nullptr;
+    SizeT size = 0;
+    SizeT _ : (sizeof(SizeT) * CHAR_BIT - 2) = 0;
+    SizeT shared : 1 = 1;
+    SizeT allocated : 1 = 0;
+    static constexpr std::size_t capacity = 0;
+};
 
-            static constexpr std::size_t sso_capacity = sizeof(non_sso_string) / sizeof(char_type) - 1;
-            static constexpr std::uintptr_t control_mask = 0b11;
-            static constexpr std::uintptr_t shared_mask = 0b01;
-            static constexpr std::uintptr_t allocated_mask = 0b10;
+template<typename CharT, std::size_t Size>
+struct sso_string {
+    CharT data[Size] = {};
+    unsigned char _[sizeof(CharT) - 1] = {};
+    unsigned char size : (CHAR_BIT - 2) = 0;
+    unsigned char shared : 1 = 0;
+    unsigned char allocated : 1 = 0;
+    static constexpr std::size_t capacity = Size - 1;
+};
 
-            union sso_block {
-                char_type small[sso_capacity + 1] = {};
-                non_sso_string non_sso;
-            };
+template<typename CharT, std::size_t Size>
+    requires (sizeof(CharT) == 1)
+struct sso_string<CharT, Size> {
+    CharT data[Size] = {};
+    unsigned char size : (CHAR_BIT - 2) = 0;
+    unsigned char shared : 1 = 0;
+    unsigned char allocated : 1 = 0;
+    static constexpr std::size_t capacity = Size - 1;
+};
 
-            sso_block storage = {};
-            mutable std::uintptr_t control = 0;
-        };
+struct status {
+    bool shared, allocated;
+    friend constexpr bool operator==(const status&, const status&) = default;
+};
 
-        struct alignas(std::max_align_t) cow_string_control_block
-        {
-            template<typename CharT>
-            constexpr CharT* data() noexcept {
-                return std::launder(static_cast<CharT*>(static_cast<void*>(this + 1)));
+// sso buffer
+inline constexpr status small   = { .shared = false, .allocated = false };
+// bind to static string (literal or via std::define_static_string)
+inline constexpr status literal = { .shared = true, .allocated = false };
+// allocated but no one copy yet
+inline constexpr status owned   = { .shared = false, .allocated = true };
+// allocated and may shared with others (maybe they have already released it after copy)
+inline constexpr status shared  = { .shared = true, .allocated = true };
+
+template<typename CharT, typename SizeT>
+union storage {
+    using dyn_type = dyn_string<CharT, SizeT>;
+    using sta_type = sta_string<CharT, SizeT>;
+    static constexpr std::size_t bufsz = (sizeof(dyn_type) - 1) / sizeof(CharT) > 2
+        ? (sizeof(dyn_type) - 1) / sizeof(CharT) : 2;
+    using sso_type = sso_string<CharT, bufsz>;
+
+    dyn_type dyn;
+    sta_type sta;
+    sso_type sso;
+
+    static_assert(sizeof(dyn) == sizeof(sta) && sizeof(dyn) == sizeof(sso));
+
+    constexpr details::status status() const noexcept {
+        if consteval {
+            if (std::is_within_lifetime(&sso)) {
+                return small;
+            } else if (std::is_within_lifetime(&sta)) {
+                return literal;
+            } else {
+                std::unreachable();
             }
-
-            const std::size_t block_count = 0;
-            std::atomic_size_t reference_counter = 0;
-        };
-
-        struct allocation_result {
-            cow_string_control_block* block = nullptr;
-            std::size_t capacity = 0;
-        };
-
-        template<typename CharT, typename Alloc>
-        constexpr allocation_result allocate(const Alloc& source, std::size_t capacity) {
-            using source_traits = std::allocator_traits<Alloc>;
-            using allocator = typename source_traits::template rebind_alloc<cow_string_control_block>;
-            using traits = std::allocator_traits<allocator>;
-            allocator alloc(source);
-            const std::size_t total_size = sizeof(CharT) * (capacity + 1) / sizeof(cow_string_control_block) + 2;
-            cow_string_control_block* block = traits::allocate(alloc, total_size); // may throw here
-            traits::construct(alloc, block, total_size, 1);
-            const std::size_t actual_capacity = (total_size - 1) * sizeof(cow_string_control_block) / sizeof(CharT) - 1;
-            return { block, actual_capacity };
+        } else {
+            const auto probe = std::bit_cast<sso_type>(*this);
+            return { probe.shared, probe.allocated };
         }
+    }
 
-        template<typename Alloc>
-        constexpr void deallocate(const Alloc& source, cow_string_control_block* block) noexcept {
-            using source_traits = std::allocator_traits<Alloc>;
-            using allocator = typename source_traits::template rebind_alloc<cow_string_control_block>;
-            using traits = std::allocator_traits<allocator>;
-            allocator alloc(source);
-            const std::size_t total_size = block->block_count;
-            traits::destroy(alloc, block);
-            traits::deallocate(alloc, block, total_size);
-        }
-
-        static_assert(alignof(cow_string_control_block) >= 4);
-
-        template<typename Iter, typename Sent, typename CharT>
-        concept eligible_iter_and_sent = std::input_iterator<std::decay_t<Iter>>
-            && std::sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>
-            && std::convertible_to<std::iter_reference_t<std::decay_t<Iter>>, CharT>;
-
-        template<typename R, typename CharT>
-        concept container_compatible_range = std::ranges::input_range<R>
-            && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
-
-        template<typename CharT, std::size_t N>
-        struct cow_string_literal_helper {
-            using char_type = CharT;
-            using cow_string_type = basic_cow_string<CharT, std::allocator<CharT>>;
-
-            consteval cow_string_literal_helper(const CharT(&str)[N]) noexcept {
-                std::ranges::copy_n(str, N, literal);
+    template<typename Self, typename OP>
+    constexpr auto visit(this Self& self, OP op) noexcept {
+        const auto s = self.status();
+        if (s == small) {
+            return op(self.sso);
+        } else if (s == literal) {
+            if constexpr (std::is_const_v<Self>) {
+                return op(self.sta);
             }
+        } else if !consteval {
+            return op(self.dyn);
+        }
+        std::unreachable();
+    }
 
-            CharT literal[N];
-        };
-
-        // Allocator strategy of cow_string
-        // On copy:
-        //  If allocator_traits::is_always_equal is true, life is easy;
-        //  If not but propagate_on_container_copy_assignment is true, just copy assign
-        //  the allocator, then here is this->get_allocator() == other.get_allocator(), and
-        //  life is still easy;
-        //  If both is false, we have to do deep copy if allocators are not equal, and
-        //  the copy ctor has to be marked as throwing anyway.
-        // On move:
-        //  Things are basically the same as copy.
-        // On swap:
-        //  Things are basically the same as copy, but deep copy twice.
-        template<typename AllocatorTraits>
-        struct cow_string_allocator_propagate_traits {
-            static constexpr bool is_always_equal = AllocatorTraits::is_always_equal::value;
-            static constexpr bool simple_copy = is_always_equal
-                || AllocatorTraits::propagate_on_container_copy_assignment::value;
-            static constexpr bool simple_move = is_always_equal
-                || AllocatorTraits::propagate_on_container_move_assignment::value;
-            static constexpr bool simple_swap = is_always_equal
-                || AllocatorTraits::propagate_on_container_swap::value;
-        };
-
-    } // namespace mylib::details
-
-    template<typename CharT, typename Allocator = std::allocator<CharT>>
-    class basic_cow_string : private Allocator, private details::storage_block<CharT>
+    // There is no writable string during compile time
+    CharT* data() noexcept
+        pre (!status().shared)
     {
-    public:
-        using value_type = CharT;
-        using char_type = CharT;
-        using allocator_type = std::allocator_traits<Allocator>::template rebind_alloc<char_type>;
-        using allocator_traits_type = std::allocator_traits<allocator_type>;
-        using size_type = allocator_traits_type::size_type;
-        using difference_type = allocator_traits_type::difference_type;
-        using const_reference = const value_type&;
-        using reference = const_reference;
-        using const_pointer = allocator_traits_type::const_pointer;
-        using pointer = const_pointer;
-        using const_iterator = const value_type*;
-        using iterator = const_iterator;
-        using const_reverse_iterator = std::reverse_iterator<const_iterator>;
-        using reverse_iterator = std::reverse_iterator<iterator>;
+        return visit([](auto& s) -> CharT* { return s.data; });
+    }
 
-        using string_view_type = std::basic_string_view<value_type>;
-        using string_type = std::basic_string<value_type>;
+    constexpr const CharT* data() const noexcept {
+        return visit([](const auto& s) -> const CharT* { return s.data; });
+    }
 
-        static constexpr size_type npos = static_cast<size_type>(-1);
+    constexpr SizeT size() const noexcept {
+        return visit([](const auto& s) -> SizeT { return s.size; });
+    }
 
-        constexpr explicit basic_cow_string(const allocator_type& alloc) noexcept
-            : allocator_type(alloc)
-        {}
+    constexpr SizeT capacity() const noexcept {
+        return visit([](const auto& s) -> SizeT { return s.capacity; });
+    }
 
-        constexpr basic_cow_string() noexcept(std::is_nothrow_default_constructible_v<allocator_type>)
-            : basic_cow_string(allocator_type())
-        {}
+    using string_view_type = std::basic_string_view<CharT>;
 
-        constexpr basic_cow_string(size_type count, const char_type ch,
-            const allocator_type& alloc = allocator_type())
-            : basic_cow_string(alloc) {
+    constexpr string_view_type view() const noexcept {
+        return visit([](const auto& s) -> string_view_type { return { s.data, s.size }; });
+    }
+};
+
+// shall never allocate through the allocator during constant evaluation
+template<typename CharT>
+struct allocation {
+    CharT* data = nullptr;
+    std::size_t capacity = 0;
+};
+
+template<typename Alloc, typename Traits = std::allocator_traits<Alloc>>
+allocation<typename Traits::value_type> allocate(const Alloc& source, std::size_t capacity) {
+    using allocator = Traits::template rebind_alloc<std::size_t>;
+    using traits = std::allocator_traits<allocator>;
+    using value_type = Traits::value_type;
+    static_assert(sizeof(std::size_t) >= sizeof(value_type)
+               && alignof(std::size_t) >= alignof(value_type));
+    allocator alloc(source);
+    const std::size_t total_size =
+        (sizeof(value_type) * (capacity + 1) + sizeof(std::size_t) - 1) / sizeof(std::size_t) + 1;
+    std::size_t* block = traits::allocate(alloc, total_size);
+    traits::construct(alloc, block, 1);
+    const std::size_t actual_capacity =
+        (total_size - 1) * sizeof(std::size_t) / sizeof(value_type) - 1;
+    return { reinterpret_cast<value_type*>(block + 1), actual_capacity };
+}
+
+template<typename Alloc, typename Traits = std::allocator_traits<Alloc>>
+void deallocate(const Alloc& source, allocation<typename Traits::value_type> mem) noexcept {
+    using allocator = Traits::template rebind_alloc<std::size_t>;
+    using traits = std::allocator_traits<allocator>;
+    using value_type = Traits::value_type;
+    allocator alloc(source);
+    std::size_t* block = reinterpret_cast<std::size_t*>(mem.data) - 1;
+    const std::size_t total_size =
+        (mem.capacity + 1) * sizeof(value_type) / sizeof(std::size_t) + 1;
+    traits::destroy(alloc, block);
+    traits::deallocate(alloc, block, total_size);
+}
+
+template<typename Iter, typename Sent, typename CharT>
+concept eligible_iter_and_sent = std::input_iterator<std::decay_t<Iter>>
+    && std::sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>
+    && std::convertible_to<std::iter_reference_t<std::decay_t<Iter>>, CharT>;
+
+template<typename R, typename CharT>
+concept container_compatible_range = std::ranges::input_range<R>
+    && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
+
+template<typename CharT>
+class literal_helper
+{
+public:
+    literal_helper() = delete;
+    literal_helper(const literal_helper&) = delete;
+    literal_helper& operator=(const literal_helper&) = delete;
+
+    consteval literal_helper(const CharT* s)
+        : str(s), length(std::char_traits<CharT>::length(s))
+    {
+        if (!std::is_string_literal(s)) {
+            std::unreachable();
+        }
+    }
+
+    consteval const CharT* data() const noexcept { return str; }
+    consteval std::size_t size() const noexcept { return length; }
+
+private:
+    const CharT* str;
+    std::size_t length;
+};
+
+} // namespace cow::details
+
+template<typename CharT, typename Allocator = std::allocator<CharT>>
+class basic_cow_string : private Allocator
+{
+public:
+    using value_type = CharT;
+    using char_type = CharT;
+    using allocator_type = Allocator;
+    using allocator_traits_type = std::allocator_traits<allocator_type>;
+    using size_type = allocator_traits_type::size_type;
+    using difference_type = allocator_traits_type::difference_type;
+    using const_reference = const value_type&;
+    using reference = value_type&;
+    using const_pointer = allocator_traits_type::const_pointer;
+    using pointer = allocator_traits_type::pointer;
+    using const_iterator = const value_type*;
+    using iterator = value_type*;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+
+    using string_view_type = std::basic_string_view<value_type>;
+    using string_type = std::basic_string<value_type>;
+
+    static constexpr size_type npos = static_cast<size_type>(-1);
+
+private:
+    static_assert(std::is_same_v<value_type, typename allocator_traits_type::value_type>);
+    static_assert(details::is_valid_char_type<CharT>);
+    static_assert(std::is_pointer_v<pointer> && std::is_pointer_v<const_pointer>
+        && std::is_same_v<std::remove_const_t<std::remove_pointer_t<const_pointer>>, char_type>
+        && std::is_same_v<std::remove_pointer_t<pointer>, char_type>);
+    using storage_type = details::storage<char_type, size_type>;
+    static_assert(sizeof(storage_type) == sizeof(storage_type::dyn));
+
+    // Allocator strategy of cow_string
+    // On copy:
+    //  If allocator_traits::is_always_equal is true, life is easy;
+    //  If not but propagate_on_container_copy_assignment is true, just copy assign
+    //  the allocator, then here is this->get_allocator() == other.get_allocator(), and
+    //  life is still easy;
+    //  If both is false, we have to do deep copy if allocators are not equal, and
+    //  the copy ctor has to be marked as throwing anyway.
+    // On move:
+    //  Things are basically the same as copy.
+    // On swap:
+    //  Things are basically the same as copy, but deep copy twice.
+    static constexpr bool always_equal_alloc = allocator_traits_type::is_always_equal::value;
+    static constexpr bool POCCA = allocator_traits_type::propagate_on_container_copy_assignment::value;
+    static constexpr bool POCMA = allocator_traits_type::propagate_on_container_move_assignment::value;
+    static constexpr bool POCS = allocator_traits_type::propagate_on_container_swap::value;
+    static_assert(std::is_nothrow_swappable_v<allocator_type>
+        && std::is_nothrow_move_constructible_v<allocator_type>
+        && std::is_nothrow_move_assignable_v<allocator_type>);
+
+    constexpr details::status status() const noexcept { return storage.status(); }
+
+    template<details::container_compatible_range<char_type> R>
+    consteval void write_static_string(R&& r)
+        pre (!status().allocated)
+        post (!status().allocated)
+    {
+        string_type test(std::from_range, std::forward<R>(r));
+        if (test.size() <= storage.sso.capacity) {
+            write_sso(test);
+        } else {
+            std::start_lifetime(storage.sta);
+            storage.sta = { .data = std::define_static_string(test), .size = test.size() };
+        }
+    }
+
+    constexpr char_type* write_sso(string_view_type view) noexcept
+        pre (view.size() <= storage.sso.capacity)
+        post (status() == details::small)
+    {
+        std::start_lifetime(storage.sso);
+        storage.sso = {};
+        char_type* const data = storage.sso.data;
+        if (!view.empty()) {
+            std::ranges::copy_n(view.data(), view.size(), data);
+        }
+        data[view.size()] = char_type();
+        storage.sso.size = static_cast<unsigned char>(view.size());
+        return storage.sso.data;
+    }
+
+    // Copy `view` into the sso buffer and then release the old allocated block.
+    // `view` may alias the sso buffer (small string) or point into storage.dyn.
+    constexpr char_type* write_sso_release(string_view_type view) noexcept {
+        if (!status().allocated) {
+            return write_sso(view);
+        }
+        const auto old = storage.dyn;
+        const bool last_owner = !old.shared
+            || ref_count().fetch_sub(1, std::memory_order_acq_rel) == 1;
+        char_type* const result = write_sso(view);
+        if (last_owner) {
+            details::deallocate(get_allocator(), { old.data, old.capacity });
+        }
+        return result;
+    }
+
+    std::atomic_ref<std::size_t> ref_count() const noexcept
+        pre (status().allocated)
+    {
+        return std::atomic_ref<std::size_t>(
+            *(reinterpret_cast<std::size_t*>(storage.dyn.data) - 1)
+        );
+    }
+
+    constexpr allocator_type allocator_copy() const noexcept(always_equal_alloc) {
+        if constexpr (always_equal_alloc) {
+            return allocator_type();
+        } else {
+            return allocator_traits_type::select_on_container_copy_construction(
+                get_allocator()
+            );
+        }
+    }
+
+    constexpr allocator_type allocator_move() && noexcept {
+        if constexpr (always_equal_alloc) {
+            return allocator_type();
+        } else {
+            return static_cast<allocator_type&&>(*this);
+        }
+    }
+
+    constexpr void set_states_on_copy(const basic_cow_string& other) noexcept
+        pre (this->get_allocator() == other.get_allocator() || !other.status().allocated)
+    {
+        if (other.status().allocated) {
+            // owned or shared string
+            // share with source
+            other.storage.dyn.shared = 1;
+            storage = other.storage;
+            ref_count().fetch_add(1, std::memory_order_relaxed);
+        } else {
+            storage = other.storage;
+        }
+    }
+
+    constexpr void set_states_on_move(basic_cow_string&& other) noexcept {
+        if (other.status().allocated) {
+            // owned or shared string
+            // steal from source and set it to sso empty string
+            storage = other.storage;
+            std::start_lifetime(storage.sso);
+            other.storage.sso = {};
+        } else {
+            storage = other.storage;
+        }
+    }
+
+    constexpr void deallocate_if_needed() noexcept {
+        const auto s = status();
+        if (s.allocated && (!s.shared || ref_count().fetch_sub(1, std::memory_order_acq_rel) == 1)) {
+            details::deallocate(get_allocator(), { storage.dyn.data, storage.dyn.capacity });
+            std::start_lifetime(storage.sso);
+            storage.sso = {};
+        }
+    }
+
+    // If capacity < str.size(), exceeded contents are discarded
+    char_type* allocate_exclusive_buffer(string_view_type str, std::size_t capacity) {
+        const char_type* const str_data = str.data();
+        const std::size_t size = std::ranges::min(str.size(), capacity);
+        auto [data, actual_capacity] = details::allocate(get_allocator(), capacity);
+        std::ranges::copy_n(str_data, size, data);
+        data[size] = char_type();
+        deallocate_if_needed();
+        std::start_lifetime(storage.dyn);
+        storage.dyn = { .data = data, .size = size, .capacity = actual_capacity };
+        return data;
+    }
+
+    char_type* allocate_exclusive_buffer(string_view_type str) {
+        return allocate_exclusive_buffer(str, str.size());
+    }
+
+    char_type* reserve_or_exclusive_shrink(size_type new_cap)
+        post (exclusive())
+    {
+        // Get new buffer if is shared with other strings or holds literal.
+        // In this case, new buffer always have capacity of new_cap regardless of current capacity.
+        // Tail contents are discarded if new_cap < size() here. (The 'exclusive shrink' branch)
+        if (!exclusive()) {
+            if (new_cap > storage.sso.capacity) {
+                return allocate_exclusive_buffer(view(), new_cap);
+            } else {
+                return write_sso_release(subview(0, new_cap));
+            }
+        } else {
+            const size_type old_cap = capacity();
+            if (new_cap > old_cap) {
+                // The auto growing branch
+                return allocate_exclusive_buffer(view(), std::ranges::max(new_cap, old_cap * 2));
+            } else {
+                // Already exclusive and having enough capacity
+                // Nothing to do here.
+                return storage.data();
+            }
+        }
+    }
+
+    char_type* exclusive_data() { return reserve_or_exclusive_shrink(size()); }
+
+    void check_index(size_type index) const {
+        if (index >= size()) {
+            throw std::out_of_range("basic_cow_string: out of range");
+        }
+    }
+
+public:
+    constexpr explicit basic_cow_string(const allocator_type& alloc) noexcept
+        : allocator_type(alloc)
+    {}
+
+    constexpr basic_cow_string()
+        noexcept(std::is_nothrow_default_constructible_v<allocator_type>)
+        : basic_cow_string(allocator_type())
+    {}
+
+    constexpr basic_cow_string(size_type count, char_type ch,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(alloc)
+    {
+        if consteval {
+            write_static_string(std::views::repeat(ch, count));
+        } else {
             append(count, ch);
         }
+    }
 
-        template<typename Iter, typename Sent>
-            requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-        constexpr basic_cow_string(Iter&& iter, Sent&& sent,
-            const allocator_type& alloc = allocator_type())
-            : basic_cow_string(alloc) {
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    constexpr basic_cow_string(Iter&& iter, Sent&& sent,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(alloc)
+    {
+        if consteval {
+            write_static_string(
+                std::ranges::subrange(std::forward<Iter>(iter), std::forward<Sent>(sent))
+            );
+        } else {
             append(std::forward<Iter>(iter), std::forward<Sent>(sent));
         }
+    }
 
-        template<details::container_compatible_range<char_type> R>
-        constexpr basic_cow_string(std::from_range_t, R&& r,
-            const allocator_type& alloc = allocator_type())
-            : basic_cow_string(alloc) {
+    template<details::container_compatible_range<char_type> R>
+    constexpr basic_cow_string(std::from_range_t, R&& r,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(alloc)
+    {
+        if consteval {
+            write_static_string(std::forward<R>(r));
+        } else {
             append_range(std::forward<R>(r));
         }
+    }
 
-        constexpr basic_cow_string(const char_type* s, size_type count,
-            const allocator_type& alloc = allocator_type())
-            : basic_cow_string(string_view_type(s, count), alloc)
-        {}
+    constexpr basic_cow_string(const char_type* s, size_type count,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(string_view_type(s, count), alloc)
+    {}
 
-        constexpr basic_cow_string(std::nullptr_t) = delete;
+    constexpr basic_cow_string(std::nullptr_t) = delete;
 
-        constexpr basic_cow_string(const basic_cow_string& other) noexcept
-            : allocator_type(other.allocator_copy()) {
+    constexpr basic_cow_string(const basic_cow_string& other) noexcept(always_equal_alloc)
+        : allocator_type(other.allocator_copy())
+    {
+        if (this->get_allocator() == other.get_allocator() || !other.status().allocated) {
             set_states_on_copy(other);
+        } else {
+            basic_cow_string(other.view(), get_allocator()).swap(*this);
         }
+    }
 
-        constexpr basic_cow_string(basic_cow_string&& other) noexcept
-            : allocator_type(std::move(other).allocator_move()) {
-            set_states_on_move(std::move(other));
-        }
+    constexpr basic_cow_string(basic_cow_string&& other) noexcept
+        : allocator_type(std::move(other).allocator_move())
+    {
+        set_states_on_move(std::move(other));
+    }
 
-        constexpr basic_cow_string(const basic_cow_string& other,
-            const size_type pos, const size_type count)
-            : basic_cow_string(other.substr(pos, count))
-        {}
+    constexpr basic_cow_string(const basic_cow_string& other,
+                               size_type pos, size_type count)
+        : basic_cow_string(other.substr(pos, count))
+    {}
 
-        constexpr basic_cow_string(const basic_cow_string& other,
-            const size_type pos)
-            : basic_cow_string(other, pos, npos)
-        {}
+    constexpr basic_cow_string(const basic_cow_string& other, size_type pos)
+        : basic_cow_string(other, pos, npos)
+    {}
 
-        constexpr basic_cow_string(basic_cow_string&& other,
-            const size_type pos, const size_type count)
-            : basic_cow_string(std::move(other).substr(pos, count))
-        {}
+    constexpr basic_cow_string(basic_cow_string&& other,
+                               size_type pos, size_type count)
+        : basic_cow_string(std::move(other).substr(pos, count))
+    {}
 
-        constexpr basic_cow_string(basic_cow_string&& other,
-            const size_type pos)
-            : basic_cow_string(std::move(other), pos, npos)
-        {}
+    constexpr basic_cow_string(basic_cow_string&& other, size_type pos)
+        : basic_cow_string(std::move(other), pos, npos)
+    {}
 
-        constexpr basic_cow_string(std::initializer_list<char_type> il,
-            const allocator_type& alloc = allocator_type())
-            : basic_cow_string(il.begin(), il.end(), alloc)
-        {}
+    constexpr basic_cow_string(std::initializer_list<char_type> il,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(il.begin(), il.end(), alloc)
+    {}
 
-        // From literal
-        // May assign literal to cow_string via conversion
-        template<std::size_t N>
-        consteval basic_cow_string(const char_type(&literal)[N]) noexcept {
-            this->storage.non_sso.size = N - 1;
-            this->storage.non_sso.capacity = 0; // 0 capacity indicates always need allocation on write
-            this->storage.non_sso.data = literal;
-            this->control = 0b01;
-        }
+    consteval basic_cow_string(const char_type* literal)
+        noexcept(std::is_nothrow_default_constructible_v<allocator_type>)
+        : basic_cow_string(literal, allocator_type())
+    {}
 
-        template<std::convertible_to<string_view_type> StringViewLike>
-            requires (!std::is_array_v<std::remove_cvref_t<StringViewLike>>)
-        constexpr basic_cow_string(const StringViewLike& sv, const allocator_type& alloc = allocator_type()) 
-            : basic_cow_string(alloc) {
-            const string_view_type view = sv;
-            const std::size_t size = view.size();
-            if (size > this->sso_capacity) {
+    constexpr basic_cow_string(details::literal_helper<char_type> literal,
+                               const allocator_type& alloc) 
+        : basic_cow_string(alloc)
+    {
+        std::start_lifetime(storage.sta);
+        storage.sta = { .data = literal.data(), .size = literal.size() };
+    }
+
+    template<std::convertible_to<string_view_type> StringViewLike>
+        requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
+    constexpr basic_cow_string(const StringViewLike& sv,
+                               const allocator_type& alloc = allocator_type()) 
+        : basic_cow_string(alloc)
+    {
+        const string_view_type view = sv;
+        const std::size_t size = view.size();
+        if (size > storage.sso.capacity) {
+            if consteval {
+                write_static_string(view);
+            } else {
                 allocate_exclusive_buffer(view);
-            } else {
-                std::ranges::copy_n(view.data(), size, this->storage.small);
-                this->storage.small[size] = char_type();
-                this->control = size << 2;
             }
+        } else {
+            write_sso(view);
         }
+    }
 
-        template<std::convertible_to<string_view_type> StringViewLike>
-        constexpr basic_cow_string(const StringViewLike& sv,
-            const size_type pos, const size_type count,
-            const allocator_type& alloc = allocator_type())
-            : basic_cow_string(string_view_type(sv).substr(pos, count), alloc)
-        {}
+    constexpr basic_cow_string(string_view_type sv,
+                               size_type pos, size_type count,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(string_view_type(sv).substr(pos, count), alloc)
+    {}
 
-        template<std::convertible_to<string_view_type> StringViewLike>
-        constexpr basic_cow_string(const StringViewLike& sv,
-            const size_type pos,
-            const allocator_type& alloc = allocator_type())
-            : basic_cow_string(sv, pos, npos, alloc)
-        {}
+    constexpr basic_cow_string(string_view_type sv, size_type pos,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(sv, pos, npos, alloc)
+    {}
 
-        constexpr ~basic_cow_string() {
-            deallocate_if_needed();
+    constexpr ~basic_cow_string() { deallocate_if_needed(); }
+
+    // Non-modifying methods
+
+#ifdef COW_STRING_TEST_STATUS
+
+    // For testing purposes only
+    constexpr bool is_small() const noexcept { return status() == details::small; }
+    // For testing purposes only
+    constexpr bool is_literal() const noexcept { return status() == details::literal; }
+    // For testing purposes only
+    constexpr bool is_owned() const noexcept { return status() == details::owned; }
+    // For testing purposes only
+    // Note that this only checks local status, not reference counter
+    constexpr bool is_shared() const noexcept { return status() == details::shared; }
+    // For testing purposes only
+    // Maybe inaccurate in concurrent scenarios
+    std::size_t cur_count() const noexcept {
+        if (!status().shared) {
+            return 0;
         }
+        return ref_count().load(std::memory_order_relaxed);
+    }
 
-#ifdef MYLIB_COW_STRING_TEST_STATUS
+#endif // COW_STRING_TEST_STATUS
 
-        // For test only
-        constexpr bool is_sso() const noexcept {
-            return !shared() && !allocated();
+    // Check if writing ops would require sso-filling/allocation first
+    constexpr bool exclusive() const noexcept {
+        const auto s = status();
+        if (s == details::small) {
+            return true;
         }
-
-        // For test only
-        constexpr bool is_literal() const noexcept {
-            return shared() && !allocated();
+        if (s == details::shared || s == details::literal) {
+            return false;
         }
-
-        // For test only
-        constexpr bool is_owned() const noexcept {
-            return !shared() && allocated();
+        if (ref_count().load(std::memory_order_acquire) == 1) {
+            storage.dyn.shared = 0;
+            return true;
         }
+        return false;
+    }
 
-        // For test only
-        constexpr bool is_shared() const noexcept {
-            return shared() && allocated();
-        }
+    constexpr size_type size() const noexcept { return storage.size(); }
+    constexpr size_type capacity() const noexcept { return storage.capacity(); }
+    constexpr size_type length() const noexcept { return size(); }
+    constexpr bool empty() const noexcept { return size() == 0; }
+    constexpr string_view_type view() const noexcept { return storage.view(); }
+    constexpr string_type string() const { return string_type(view()); }
+    constexpr operator string_view_type() const noexcept { return view(); }
+    constexpr basic_cow_string clone() const { return { view(), allocator_copy() }; }
+    constexpr const_pointer data() const noexcept { return storage.data(); }
+    constexpr const_pointer c_str() const noexcept { return storage.data(); }
+    constexpr const_iterator begin() const noexcept { return storage.data(); }
+    constexpr const_iterator end() const noexcept { return storage.data() + size(); }
+    constexpr const_iterator cbegin() const noexcept { return begin(); }
+    constexpr const_iterator cend() const noexcept { return end(); }
+    constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
+    constexpr const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
+    constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
+    constexpr const_reverse_iterator crend() const noexcept { return rend(); }        
+    constexpr const_reference front() const noexcept pre (!empty()) { return view().front(); }
+    constexpr const_reference back() const noexcept pre (!empty()) { return view().back(); }
+    constexpr const_reference operator[](size_type pos) const noexcept pre (pos < size()) { return view()[pos]; }
 
-        // For test only
-        constexpr std::size_t reference_counter() const noexcept {
-            if (allocated()) {
-                return control_block()->reference_counter.load(std::memory_order_relaxed);
-            } else {
-                return 0;
-            }
-        }
+    constexpr const_reference at(size_type pos) const {
+        check_index(pos);
+        return view()[pos];
+    }
 
-#endif // MYLIB_COW_STRING_TEST_STATUS
-        
-        // Non-modifying methods
+    constexpr size_type find(string_view_type str, size_type pos = 0) const noexcept {
+        return view().find(str, pos);
+    }
 
-        constexpr size_type size() const noexcept {
-            if (!allocated() && !shared()) {
-                return this->control >> 2;
-            } else {
-                return this->storage.non_sso.size;
-            }
-        }
+    constexpr size_type find(char_type ch, size_type pos = 0) const noexcept {
+        return view().find(ch, pos);
+    }
 
-        constexpr size_type capacity() const noexcept {
-            if (!allocated()) {
-                return this->sso_capacity;
-            } else {
-                return this->storage.non_sso.capacity;
-            }
-        }
+    constexpr size_type rfind(string_view_type str, size_type pos = npos) const noexcept {
+        return view().rfind(str, pos);
+    }
 
-        constexpr size_type length() const noexcept { return size(); }
-        constexpr bool empty() const noexcept { return size() == 0; }
+    constexpr size_type rfind(char_type ch, size_type pos = npos) const noexcept {
+        return view().rfind(ch, pos);
+    }
 
-        constexpr bool exclusive() const noexcept {
-            if (!shared() || !allocated()) {
-                return true;
-            } else {
-                if (control_block()->reference_counter.load(std::memory_order_acquire) == 1) {
-                    this->control &= ~this->shared_mask;
-                    return true;
-                } else {
-                    return false;
-                }
-            }
-        }
+    constexpr size_type find_first_of(string_view_type str, size_type pos = 0) const noexcept {
+        return view().find_first_of(str, pos);
+    }
 
-        constexpr string_view_type view() const noexcept {
-            if (!allocated() && !shared()) {
-                // small string
-                const std::size_t size = this->control >> 2;
-                return string_view_type{ this->storage.small, size };
-            } else {
-                // literal, owned or shared string
-                const std::size_t size = this->storage.non_sso.size;
-                return string_view_type{ this->storage.non_sso.data, size };
-            }
-        }
+    constexpr size_type find_first_of(char_type ch, size_type pos = 0) const noexcept {
+        return view().find_first_of(ch, pos);
+    }
 
-        constexpr string_type string() const { return string_type(view()); }
-        constexpr operator string_view_type() const noexcept { return view(); }
-        constexpr basic_cow_string clone() const { return { view(), this->allocator_copy() }; }
+    constexpr size_type find_first_not_of(string_view_type str, size_type pos = 0) const noexcept {
+        return view().find_first_not_of(str, pos);
+    }
 
-        constexpr const allocator_type& get_allocator() const noexcept {
-            return static_cast<const allocator_type&>(*this);
-        }
+    constexpr size_type find_first_not_of(char_type ch, size_type pos = 0) const noexcept {
+        return view().find_first_not_of(ch, pos);
+    }
 
-        constexpr string_view_type subview(
-            const size_type pos = 0, const size_type count = npos) const noexcept {
-            return view().substr(pos, count);
-        }
+    constexpr size_type find_last_of(string_view_type str, size_type pos = npos) const noexcept {
+        return view().find_last_of(str, pos);
+    }
 
-        constexpr const char_type* data() const noexcept { return data_unsafe(); }
-        constexpr const char_type* c_str() const noexcept { return data_unsafe(); }
-        constexpr const_iterator begin() const noexcept { return data_unsafe(); }
-        constexpr const_iterator end() const noexcept { return data_unsafe() + size(); }
-        constexpr const_iterator cbegin() const noexcept { return begin(); }
-        constexpr const_iterator cend() const noexcept { return end(); }
-        constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
-        constexpr const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
-        constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
-        constexpr const_reverse_iterator crend() const noexcept { return rend(); }        
+    constexpr size_type find_last_of(char_type ch, size_type pos = npos) const noexcept {
+        return view().find_last_of(ch, pos);
+    }
 
-        constexpr const char_type& front() const noexcept {
-            [[assume(size() > 0)]];
-            return data_unsafe()[0];
-        }
+    constexpr size_type find_last_not_of(string_view_type str, size_type pos = npos) const noexcept {
+        return view().find_last_not_of(str, pos);
+    }
 
-        constexpr const char_type& back() const noexcept {
-            const size_type sz = size();
-            [[assume(sz > 0)]];
-            return data_unsafe()[sz - 1];
-        }
+    constexpr size_type find_last_not_of(char_type ch, size_type pos = npos) const noexcept {
+        return view().find_last_not_of(ch, pos);
+    }
 
-        constexpr const char_type& operator[](const size_type pos) const noexcept {
-            const size_type sz = size();
-            [[assume(pos < sz)]];
-            return data_unsafe()[pos];
-        }
+    constexpr bool starts_with(string_view_type str) const noexcept {
+        return view().starts_with(str);
+    }
 
-        constexpr const char_type& at(const size_type pos) const {
-            if (pos >= size()) {
-                throw std::out_of_range("basic_cow_string::at: position out of range");
-            }
-            return data_unsafe()[pos];
-        }
+    constexpr bool starts_with(char_type ch) const noexcept {
+        return view().starts_with(ch);
+    }
 
-        constexpr size_type find(const string_view_type str, const size_type pos = 0) const noexcept {
-            return view().find(str, pos);
-        }
+    constexpr bool ends_with(string_view_type str) const noexcept {
+        return view().ends_with(str);
+    }
 
-        constexpr size_type find(const char_type ch, const size_type pos = 0) const noexcept {
-            return view().find(ch, pos);
-        }
+    constexpr bool ends_with(char_type ch) const noexcept {
+        return view().ends_with(ch);
+    }
 
-        constexpr size_type rfind(const string_view_type str, const size_type pos = npos) const noexcept {
-            return view().rfind(str, pos);
-        }
+    constexpr bool contains(string_view_type str) const noexcept {
+        return view().contains(str);
+    }
 
-        constexpr size_type rfind(const char_type ch, const size_type pos = npos) const noexcept {
-            return view().rfind(ch, pos);
-        }
+    constexpr bool contains(char_type ch) const noexcept {
+        return view().contains(ch);
+    }
 
-        constexpr size_type find_first_of(const string_view_type str, const size_type pos = 0) const noexcept {
-            return view().find_first_of(str, pos);
-        }
+    constexpr const allocator_type& get_allocator() const noexcept {
+        return static_cast<const allocator_type&>(*this);
+    }
 
-        constexpr size_type find_first_of(const char_type ch, const size_type pos = 0) const noexcept {
-            return view().find_first_of(ch, pos);
-        }
+    constexpr string_view_type subview(size_type pos = 0, size_type count = npos) const noexcept {
+        return view().substr(pos, count);
+    }
 
-        constexpr size_type find_first_not_of(const string_view_type str, const size_type pos = 0) const noexcept {
-            return view().find_first_not_of(str, pos);
-        }
-
-        constexpr size_type find_first_not_of(const char_type ch, const size_type pos = 0) const noexcept {
-            return view().find_first_not_of(ch, pos);
-        }
-
-        constexpr size_type find_last_of(const string_view_type str, const size_type pos = npos) const noexcept {
-            return view().find_last_of(str, pos);
-        }
-
-        constexpr size_type find_last_of(const char_type ch, const size_type pos = npos) const noexcept {
-            return view().find_last_of(ch, pos);
-        }
-
-        constexpr size_type find_last_not_of(const string_view_type str, const size_type pos = npos) const noexcept {
-            return view().find_last_not_of(str, pos);
-        }
-
-        constexpr size_type find_last_not_of(const char_type ch, const size_type pos = npos) const noexcept {
-            return view().find_last_not_of(ch, pos);
-        }
-
-        constexpr bool starts_with(const string_view_type str) const noexcept {
-            return view().starts_with(str);
-        }
-
-        constexpr bool starts_with(const char_type ch) const noexcept {
-            return view().starts_with(ch);
-        }
-
-        constexpr bool ends_with(const string_view_type str) const noexcept {
-            return view().ends_with(str);
-        }
-
-        constexpr bool ends_with(const char_type ch) const noexcept {
-            return view().ends_with(ch);
-        }
-
-        constexpr bool contains(const string_view_type str) const noexcept {
-            return view().contains(str);
-        }
-
-        constexpr bool contains(const char_type ch) const noexcept {
-            return view().contains(ch);
-        }
-
-        // Modifying methods
-
-        constexpr void reserve(const size_type new_cap) {
-            reserve_or_exclusive_shrink(std::ranges::max(new_cap, capacity()));
-        }
-
-        template<std::invocable<char_type*, size_type> Operation>
-        constexpr void resize_and_overwrite(size_type count, Operation op) {
-            // get necessary storage
-            char_type* const p = reserve_or_exclusive_shrink(count);
-            // now exclusive
-            size_type r = std::move(op)(p, count);
-            [[assume(r <= count)]];
-            if (allocated()) {
-                this->storage.non_sso.size = r;
-            } else {
-                this->control = (r << 2);
-            }
-            p[r] = char_type();
-        }
-
-        constexpr void resize(const size_type new_size, const char_type ch = char_type()) {
-            const size_type old_size = size();
-            resize_and_overwrite(new_size,
-                [ch, old_size](char_type* p, size_type count) constexpr noexcept {
-                if (count > old_size) {
-                    std::ranges::fill(p + old_size, p + count, ch);
-                }
-                return count;
-            });
-        }
-
-        constexpr void clear() noexcept { resize(0); }
-
-        constexpr void shrink_to_fit() {
-            if (allocated()) {
-                if (size() <= this->sso_capacity) {
-                    // move to sso
-                    write_sso_buffer(view());
-                    deallocate_if_needed();
-                } else if (!exclusive() || size() < capacity()) {
-                    // reallocate to smaller buffer
-                    allocate_exclusive_buffer(view());
-                }
-            }
-        }
-
-    private:
-        using propagate_traits = details::cow_string_allocator_propagate_traits<allocator_traits_type>;
-        static constexpr bool is_always_equal = propagate_traits::is_always_equal;
-        static constexpr bool simple_copy = propagate_traits::simple_copy;
-        static constexpr bool simple_move = propagate_traits::simple_move;
-        static constexpr bool simple_swap = propagate_traits::simple_swap;
-
-    public:
-        constexpr void swap(basic_cow_string& other) noexcept(simple_swap) {
-            if constexpr (simple_swap) {
-                std::ranges::swap((allocator_type&)*this, (allocator_type&)other);
-                this->do_swap_states(other);
-            } else {
-                const bool allocator_equal = this->get_allocator() == other.get_allocator();
-                const bool both_not_allocated = !this->allocated() && !other.allocated();
-                if (allocator_equal || both_not_allocated) {
-                    this->do_swap_states(other);
-                } else {
-                    // According to standard container requirement, this is undefined behavior.
-                    // But we will make it well-defined for cow_string.
-                    basic_cow_string original = *this; // share with source
-                    *this = other.view(); // may throw, but strong-guaranteed
-                    try {
-                        other = original.view();
-                    } catch (...) {
-                        // Strong guarantee
-                        // Assign from view is strong-guaranteed itself,
-                        // so only the first one may need to rollback.
-                        this->do_swap_states(original);
-                        throw;
-                    }
-                }
-            }
-        }
-
-        friend constexpr void swap(basic_cow_string& lhs, basic_cow_string& rhs)
-            noexcept(noexcept(lhs.swap(rhs))) {
-            lhs.swap(rhs);
-        }
-
-        constexpr basic_cow_string& assign(std::nullptr_t) = delete;
-        constexpr basic_cow_string& operator=(std::nullptr_t) = delete;
-
-        constexpr basic_cow_string& assign(const basic_cow_string& other)
-            noexcept(simple_copy || simple_swap) {
-            if constexpr (simple_swap) {
-                basic_cow_string(other).swap(*this);
-            } else if constexpr (simple_copy) {
-                if (this != &other) {
-                    deallocate_if_needed();
-                    ((allocator_type&)*this) = other.allocator_copy();
-                    set_states_on_copy(other);
-                }
-            } else {
-                if (this != &other) {
-                    if (this->get_allocator() == other.get_allocator()) {
-                        set_states_on_copy(other);
-                    } else {
-                        // Can not share with source, do deep copy
-                        *this = other.view(); // may throw, but strong-guaranteed
-                    }
-                }
-            }
-            return *this;
-        }
-
-        constexpr basic_cow_string& operator=(const basic_cow_string& other)
-            noexcept(noexcept(this->assign(other))) {
-            return assign(other);
-        }
-
-        constexpr basic_cow_string& assign(basic_cow_string&& other)
-            noexcept(simple_swap || simple_move) {
-            if constexpr (simple_swap) {
-                basic_cow_string(std::move(other)).swap(*this);
-            } else if constexpr (simple_move) {
-                if (this != &other) {
-                    deallocate_if_needed();
-                    ((allocator_type&)*this) = std::move(other).allocator_move();
-                    set_states_on_move(std::move(other));
-                }
-            } else {
-                if (this != &other) {
-                    if (this->get_allocator() == other.get_allocator()) {
-                        set_states_on_move(std::move(other));
-                    } else {
-                        // Can not share with source, do deep copy
-                        *this = other.view(); // may throw, but strong-guaranteed
-                    }
-                }
-            }
-            return *this;
-        }
-
-        constexpr basic_cow_string& operator=(basic_cow_string&& other)
-            noexcept(noexcept(this->assign(std::move(other)))) {
-            return assign(std::move(other));
-        }
-
-        template<std::convertible_to<string_view_type> StringViewLike>
-            requires (!std::is_array_v<std::remove_cvref_t<StringViewLike>>)
-        constexpr basic_cow_string& assign(const StringViewLike& sv) {
-            const string_view_type view = sv;
-            const auto* const data = view.data();
-            const size_type size = view.size();
-            resize_and_overwrite(view.size(), 
-                [data, size](char_type* p, size_type count) constexpr noexcept {
-                std::ranges::copy_n(data, size, p);
-                return count;
-            });
-            return *this;
-        }
-
-        template<std::convertible_to<string_view_type> StringViewLike>
-            requires (!std::is_array_v<std::remove_cvref_t<StringViewLike>>)
-        constexpr basic_cow_string& operator=(const StringViewLike& sv) {
-            return assign(sv);
-        }
-
-        constexpr basic_cow_string& assign(char_type ch) {
-            return assign(string_view_type(&ch, 1));
-        }
-
-        constexpr basic_cow_string& operator=(char_type ch) {
-            return assign(ch);
-        }
-
-        constexpr basic_cow_string& assign(std::initializer_list<char_type> il) {
-            return assign(string_view_type(il));
-        }
-
-        constexpr basic_cow_string& operator=(std::initializer_list<char_type> il) {
-            return assign(il);
-        }
-
-        template<typename Iter, typename Sent>
-            requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-        constexpr basic_cow_string& assign(Iter&& iter, Sent&& sent) {
-            if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
-                basic_cow_string(std::forward<Iter>(iter), std::forward<Sent>(sent), allocator_copy())
-                    .swap(*this);
-            } else {
-                clear();
-                append(std::forward<Iter>(iter), std::forward<Sent>(sent));
-            }
-        }
-
-        constexpr basic_cow_string& assign(size_type count, const char_type ch) {
-            if (count <= capacity()) {
-                clear();
-            }
-            resize(count, ch);
-            return *this;
-        }
-
-        constexpr basic_cow_string& assign(const char_type* s, size_type count) {
-            return assign(string_view_type(s, count));
-        }
-
-        constexpr basic_cow_string& assign(const basic_cow_string& str,
-            const size_type pos, const size_type count = npos) {
-            basic_cow_string(str, pos, count).swap(*this);
-            return *this;
-        }
-
-        constexpr basic_cow_string& assign(basic_cow_string&& str,
-            const size_type pos, const size_type count = npos) {
-            basic_cow_string(std::move(str), pos, count).swap(*this);
-            return *this;
-        }
-
-        template<details::container_compatible_range<char_type> R>
-        constexpr basic_cow_string& assign_range(R&& r) {
-            auto rg = std::forward<R>(r);
-            return assign(std::ranges::begin(rg), std::ranges::end(rg));
-        }
-
-        constexpr basic_cow_string substr(
-            const size_type pos = 0, const size_type count = npos) const & {
+    constexpr basic_cow_string substr(size_type pos = 0, size_type count = npos) const {
+        if (pos == 0 && count >= size()) {
+            return auto(*this);
+        } else {
             return basic_cow_string(view(), pos, count, allocator_copy());
         }
+    }
 
-        constexpr basic_cow_string substr(
-            const size_type pos = 0, const size_type count = npos) && {
+    constexpr basic_cow_string substr(size_type pos = 0, size_type count = npos) && {
+        if consteval {
+            return std::as_const(*this).substr(pos, count);
+        } else {
             const size_type original_size = size();
-            [[assume(pos <= original_size)]];
             if (pos == 0 && count >= original_size) {
                 return std::move(*this);
             } else if (exclusive()) {
                 if (pos > 0) {
                     const string_view_type sub = subview(pos, count);
-                    if (shared()) {
-                        write_allocated_buffer(sub);
-                    } else {
-                        write_sso_buffer(sub);
-                    }
+                    write_sso_release(sub);
                 } else if (count < original_size) {
                     resize(count);
                 }
@@ -732,738 +749,768 @@ namespace mylib {
                 return std::as_const(*this).substr(pos, count);
             }
         }
+    }
 
-        constexpr void push_back(const char_type ch) {
-            const size_type old_size = size();
-            resize_and_overwrite(old_size + 1,
-                [ch, old_size](char_type* p, size_type count) constexpr noexcept {
-                p[old_size] = ch;
-                return count;
-            });
-        }
+    // Modifying methods
 
-        constexpr void pop_back() {
-            const size_type old_size = size();
-            [[assume(old_size > 0)]];
-            resize(old_size - 1);
-        }
+    // Make a exlusive writable string if it not already is
+    void ensure_exclusive() { (void) exclusive_data(); }
 
-        constexpr basic_cow_string& append(const size_type count, const char_type ch) {
-            resize(size() + count, ch);
-            return *this;
-        }
-
-        constexpr basic_cow_string& append(const string_view_type sv,
-            const size_type pos, const size_type count = npos) {
-            const string_view_type view = string_view_type(sv).substr(pos, count);
-            const size_type old_size = size();
-            const size_type add_size = view.size();
-            resize_and_overwrite(old_size + add_size,
-                [old_size, add_size, view](char_type* p, size_type count) constexpr noexcept {
-                std::ranges::copy_n(view.data(), add_size, p + old_size);
-                return count;
-            });
-            return *this;
-        }
-
-        constexpr basic_cow_string& append(const string_view_type sv) {
-            return append(sv, 0, npos);
-        }
-
-        constexpr basic_cow_string& append(const char_type* s, const size_type count) {
-            return append(string_view_type(s, count));
-        }
-
-        template<typename Iter, typename Sent>
-            requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-        constexpr basic_cow_string& append(Iter&& iter, Sent&& sent) {
-            const size_type old_size = size();
-            auto i = std::forward<Iter>(iter);
-            [[maybe_unused]]
-            auto s = std::forward<Sent>(sent);
-            if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
-                // push_back fallback
-                try {
-                    for (; i != s; ++i) {
-                        push_back(*i);
-                    }
-                } catch (...) {
-                    resize(old_size);
-                    throw;
-                }
-            } else {
-                const size_type add_size = std::ranges::distance(iter, sent);
-                resize_and_overwrite(old_size + add_size,
-                    [old_size, add_size, &i](char_type* p, size_type count) constexpr noexcept {
-                    std::ranges::copy_n(i, add_size, p + old_size);
-                    return count;
-                });
-            }
-            return *this;
-        }
-
-        constexpr basic_cow_string& append(std::initializer_list<char_type> il) {
-            return append(string_view_type(il));
-        }
-
-        template<details::container_compatible_range<char_type> R>
-        constexpr basic_cow_string& append_range(R&& r) {
-            auto rg = std::forward<R>(r);
-            // TODO: add approximately_sized_range branch
-            return append(std::ranges::begin(rg), std::ranges::end(rg));
-        }
-
-        constexpr basic_cow_string& operator+=(const string_view_type sv) {
-            return append(sv);
-        }
-
-        constexpr basic_cow_string& operator+=(const char_type ch) {
-            push_back(ch);
-            return *this;
-        }
-
-        constexpr basic_cow_string& operator+=(std::initializer_list<char_type> il) {
-            return append(il);
-        }
-
-        constexpr char_type* data() noexcept { return exclusive_data(); }
-        constexpr iterator begin() noexcept { return data(); }
-        constexpr iterator end() noexcept { return data() + size(); }
-        constexpr reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
-        constexpr reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
-
-        constexpr char_type& front() noexcept {
-            const size_type sz = size();
-            [[assume(sz > 0)]];
-            return exclusive_data()[0];
-        }
-
-        constexpr char_type& back() noexcept {
-            const size_type sz = size();
-            [[assume(sz > 0)]];
-            return exclusive_data()[sz - 1];
-        }
-
-        constexpr char_type& operator[](const size_type pos) noexcept {
-            const size_type sz = size();
-            [[assume(pos < sz)]];
-            return exclusive_data()[pos];
-        }
-
-        constexpr char_type& at(const size_type pos) {
-            if (pos >= size()) {
-                throw std::out_of_range("basic_cow_string::at: position out of range");
-            }
-            return exclusive_data()[pos];
-        }
-
-        constexpr basic_cow_string& insert(const size_type index,
-            const size_type count, const char_type ch) {
-            const size_type old_size = size();
-            [[assume(index <= old_size)]];
-            resize_and_overwrite(old_size + count,
-                [index, count, ch, old_size](char_type* p, size_type new_size) constexpr noexcept {
-                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
-                std::ranges::fill_n(p + index, count, ch);
-                return new_size;
-            });
-            return *this;
-        }
-
-        constexpr basic_cow_string& insert(const size_type index,
-            const char_type ch) {
-            return insert(index, 1, ch);
-        }
-
-        constexpr basic_cow_string& insert(const size_type index,
-            const string_view_type str) {
-            const size_type old_size = size();
-            const size_type add_size = str.size();
-            [[assume(index <= old_size)]];
-            resize_and_overwrite(old_size + add_size,
-                [index, add_size, str, old_size](char_type* p, size_type new_size) constexpr noexcept {
-                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
-                std::ranges::copy_n(str.data(), add_size, p + index, p + new_size);
-                return new_size;
-            });
-            return *this;
-        }
-
-        constexpr basic_cow_string& insert(const size_type index,
-            const char_type* s, const size_type count) {
-            return insert(index, string_view_type(s, count));
-        }
-
-        template<typename Iter, typename Sent>
-            requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-        constexpr basic_cow_string& insert(const size_type index,
-            Iter&& iter, Sent&& sent) {
-            const size_type old_size = size();
-            [[assume(index <= old_size)]];
-            auto i = std::forward<Iter>(iter);
-            [[maybe_unused]]
-            auto s = std::forward<Sent>(sent);
-            if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
-                // push_back fallback
-                basic_cow_string temp = substr(0, index);
-                try {
-                    for (; i != s; ++i) {
-                        temp.push_back(*i);
-                    }
-                } catch (...) {
-                    throw;
-                }
-                temp.append(subview(index, npos));
-                swap(temp);
-            } else {
-                const size_type add_size = std::ranges::distance(iter, sent);
-                resize_and_overwrite(old_size + add_size,
-                    [index, add_size, old_size, &i](char_type* p, size_type new_size) constexpr noexcept {
-                    std::ranges::copy_backward(p + index, p + old_size, p + new_size);
-                    std::ranges::copy_n(i, add_size, p + index);
-                    return new_size;
-                });
-            }
-            return *this;
-        }
-
-        constexpr basic_cow_string& insert(const size_type index,
-            std::initializer_list<char_type> il) {
-            return insert(index, il.begin(), il.end());
-        }
-
-        constexpr iterator insert(const_iterator pos, const size_type count, const char_type ch) {
-            const size_type index = pos - cbegin();
-            insert(index, count, ch);
-            return begin() + index;
-        }
-
-        constexpr iterator insert(const_iterator pos, const char_type ch) {
-            return insert(pos, 1, ch);
-        }
-
-        template<typename Iter, typename Sent>
-            requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-        constexpr iterator insert(const_iterator pos, Iter&& iter, Sent&& sent) {
-            const size_type index = pos - cbegin();
-            insert(index, std::forward<Iter>(iter), std::forward<Sent>(sent));
-            return begin() + index;
-        }
-
-        constexpr iterator insert(const_iterator pos, std::initializer_list<char_type> il) {
-            return insert(pos, il.begin(), il.end());
-        }
-
-        template<details::container_compatible_range<char_type> R>
-        constexpr basic_cow_string& insert_range(const size_type index, R&& r) {
-            auto rg = std::forward<R>(r);
-            return insert(index, std::ranges::begin(rg), std::ranges::end(rg));
-        }
-
-        constexpr basic_cow_string& erase(const size_type index = 0, const size_type count = npos) {
-            const size_type old_size = size();
-            [[assume(index <= old_size)]];
-            if (old_size - index <= count) {
-                resize(index);
-                return *this;
-            }
-            char_type* const data = exclusive_data();
-            std::ranges::copy(data + index + count, data + old_size, data + index);
-            resize(old_size - count);
-            return *this;
-        }
-
-        constexpr iterator erase(const_iterator pos) {
-            const size_type index = pos - cbegin();
-            erase(index, 1);
-            return begin() + index;
-        }
-
-        constexpr iterator erase(const_iterator first, const_iterator last) {
-            const size_type index = first - cbegin();
-            const size_type count = last - first;
-            erase(index, count);
-            return begin() + index;
-        }
-
-        constexpr basic_cow_string& replace(const size_type pos, const size_type count,
-            const string_view_type str) {
-            const size_type old_size = size();
-            [[assume(pos <= old_size)]];
-            if (old_size - pos <= count) {
-                resize(pos);
-                return append(str);
-            }
-            const size_type rcount = std::ranges::min(count, old_size - pos);
-            const size_type add_size = str.size();
-            const size_type new_size = old_size - rcount + add_size;
-            if (new_size > old_size) {
-                resize(new_size);
-                char_type* const data = data_unsafe();
-                std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
-                std::ranges::copy_n(str.data(), add_size, data + pos);
-            } else {
-                char_type* const data = exclusive_data();
-                std::ranges::copy_n(str.data(), add_size, data + pos);
-                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
-                resize(new_size);
-            }
-            return *this;
-        }
-
-        constexpr basic_cow_string& replace(const_iterator first, const_iterator last,
-            const string_view_type str) {
-            const size_type index = first - cbegin();
-            const size_type count = last - first;
-            return replace(index, count, str);
-        }
-
-        constexpr basic_cow_string& replace(const size_type pos, const size_type count,
-            const char_type* cstr, const size_type count2) {
-            return replace(pos, count, string_view_type(cstr, count2));
-        }
-
-        constexpr basic_cow_string& replace(const_iterator first, const_iterator last,
-            const char_type* cstr, size_type count2) {
-            return replace(first, last, string_view_type(cstr, count2));
-        }
-
-        constexpr basic_cow_string& replace(const size_type pos, const size_type count,
-            const size_type count2, const char_type ch) {
-            const size_type old_size = size();
-            [[assume(pos <= old_size)]];
-            if (old_size - pos <= count) {
-                resize(pos);
-                return append(count2, ch);
-            }
-            const size_type rcount = std::ranges::min(count, old_size - pos);
-            const size_type add_size = count2;
-            const size_type new_size = old_size - rcount + add_size;
-            if (new_size > old_size) {
-                resize(new_size);
-                char_type* const data = data_unsafe();
-                std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
-                std::ranges::fill_n(data + pos, add_size, ch);
-            } else {
-                char_type* const data = exclusive_data();
-                std::ranges::fill_n(data + pos, add_size, ch);
-                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
-                resize(new_size);
-            }
-            return *this;
-        }
-        
-        constexpr basic_cow_string& replace(const_iterator first, const_iterator last,
-            const size_type count2, const char_type ch) {
-            const size_type index = first - cbegin();
-            const size_type count = last - first;
-            return replace(index, count, count2, ch);
-        }
-
-        template<typename Iter, typename Sent>
-            requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-        constexpr basic_cow_string& replace(const size_type pos, const size_type count,
-            Iter&& iter, Sent&& sent) {
-            const size_type old_size = size();
-            [[assume(pos <= old_size)]];
-            auto i = std::forward<Iter>(iter);
-            [[maybe_unused]]
-            auto s = std::forward<Sent>(sent);
-            if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
-                // push_back fallback
-                basic_cow_string temp = substr(0, pos);
-                try {
-                    for (; i != s; ++i) {
-                        temp.push_back(*i);
-                    }
-                } catch (...) {
-                    throw;
-                }
-                if (old_size - pos > count) {
-                    temp.append(subview(pos + count, npos));
-                }
-                swap(temp);
-            } else {
-                if (old_size - pos <= count) {
-                    resize(pos);
-                    return append(std::forward<Iter>(i), std::forward<Sent>(s));
-                }
-                const size_type rcount = std::ranges::min(count, old_size - pos);
-                const size_type add_size = std::ranges::distance(i, s);
-                const size_type new_size = old_size - rcount + add_size;
-                if (new_size > old_size) {
-                    resize(new_size);
-                    char_type* const data = data_unsafe();
-                    std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
-                    std::ranges::move(i, s, data + pos);
+    constexpr void swap(basic_cow_string& other) noexcept(always_equal_alloc || POCS) {
+        if constexpr (always_equal_alloc) {
+            std::ranges::swap(this->storage, other.storage);
+        } else if constexpr (POCS) {
+            std::ranges::swap(
+                static_cast<allocator_type&>(*this),
+                static_cast<allocator_type&>(other)
+            );
+            std::ranges::swap(this->storage, other.storage);
+        } else if (this->get_allocator() == other.get_allocator()) {
+            std::ranges::swap(this->storage, other.storage);
+        } else {
+            // According to standard container requirement, this is undefined behavior.
+            // But we will make it well-defined for cow_string.
+            auto copy_for_swap = [](const basic_cow_string& source, const allocator_type& alloc) {
+                if (source.status().allocated) {
+                    return basic_cow_string(source.view(), alloc);
                 } else {
-                    char_type* const data = exclusive_data();
-                    std::ranges::move(i, s, data + pos);
-                    std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
-                    resize(new_size);
+                    basic_cow_string rt(alloc);
+                    rt.storage = source.storage;
+                    return rt;
                 }
-            }
+            };
+            basic_cow_string o_copy = copy_for_swap(other, this->get_allocator());
+            basic_cow_string t_copy = copy_for_swap(*this, other.get_allocator());
+            std::ranges::swap(this->storage, o_copy.storage);
+            std::ranges::swap(other.storage, t_copy.storage);
+        }
+    }
+
+    friend constexpr void swap(basic_cow_string& lhs, basic_cow_string& rhs)
+        noexcept(noexcept(lhs.swap(rhs)))
+    {
+        lhs.swap(rhs);
+    }
+
+    constexpr basic_cow_string& assign(std::nullptr_t) = delete;
+    constexpr basic_cow_string& operator=(std::nullptr_t) = delete;
+
+    constexpr basic_cow_string& assign(const basic_cow_string& other)
+        noexcept(always_equal_alloc || POCCA)
+    {
+        if (this == &other) {
             return *this;
         }
-
-        template<typename Iter, typename Sent>
-            requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-        constexpr basic_cow_string& replace(const_iterator first, const_iterator last,
-            Iter&& iter, Sent&& sent) {
-            const size_type index = first - cbegin();
-            const size_type count = last - first;
-            return replace(index, count, std::forward<Iter>(iter), std::forward<Sent>(sent));
-        }
-
-        constexpr basic_cow_string& replace(const size_type pos, const size_type count,
-            std::initializer_list<char_type> il) {
-            return replace(pos, count, il.begin(), il.end());
-        }
-
-        constexpr basic_cow_string& replace(const_iterator first, const_iterator last,
-            std::initializer_list<char_type> il) {
-            return replace(first, last, il.begin(), il.end());
-        }
-
-        template<details::container_compatible_range<char_type> R>
-        constexpr basic_cow_string& replace_with_range(const size_type pos, const size_type count,
-            R&& r) {
-            auto rg = std::forward<R>(r);
-            return replace(pos, count, std::ranges::begin(rg), std::ranges::end(rg));
-        }
-
-        template<details::container_compatible_range<char_type> R>
-        constexpr basic_cow_string& replace_with_range(const_iterator first, const_iterator last,
-            R&& r) {
-            auto rg = std::forward<R>(r);
-            return replace(first, last, std::ranges::begin(rg), std::ranges::end(rg));
-        }
-
-    private:
-        constexpr allocator_type allocator_copy() const & noexcept {
-            if constexpr (is_always_equal) {
-                return allocator_type();
-            } else {
-                return allocator_traits_type::select_on_container_copy_construction(
-                    get_allocator()
-                );
-            }
-        }
-
-        constexpr allocator_type allocator_move() && noexcept {
-            if constexpr (is_always_equal) {
-                return allocator_type();
-            } else {
-                return std::move((allocator_type&)*this);
-            }
-        }
-
-        constexpr void copy_non_allocated_states(const basic_cow_string& other) noexcept {
-            using storage = details::storage_block<char_type>;
-            (storage&)(*this) = (const storage&)(other);
-        }
-
-        constexpr void set_states_on_copy(const basic_cow_string& other) noexcept {
-            if (other.allocated()) {
-                // owned or shared string
-                // share with source
-                other.control |= 0b01; // mark as shared
-                this->control = other.control;
-                this->storage.non_sso = other.storage.non_sso;
-                control_block()->reference_counter.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                copy_non_allocated_states(other);
-            }
-        }
-
-        constexpr void set_states_on_move(basic_cow_string&& other) noexcept {
-            if (other.allocated()) {
-                // owned or shared string
-                // steal from source and set it to sso empty string
-                this->control = other.control;
-                this->storage.non_sso = other.storage.non_sso;
-                other.control = 0;
-                other.storage.small[0] = char_type();
-            } else {
-                copy_non_allocated_states(other);
-            }
-        }
-
-        constexpr void do_swap_states(basic_cow_string& other) noexcept {
-            using storage = details::storage_block<char_type>;
-            std::ranges::swap((storage&)(*this), (storage&)other);
-        }
-
-        details::cow_string_control_block* control_block() const noexcept {
-            return reinterpret_cast<details::cow_string_control_block*>(this->control & ~this->control_mask);
-        }
-
-        constexpr bool shared() const noexcept { return (this->control & this->shared_mask) != 0; }
-        constexpr bool allocated() const noexcept { return (this->control & this->allocated_mask) != 0; }
-
-        constexpr void deallocate_if_needed() noexcept {
-            if (allocated()) {
-                auto* const block = control_block();
-                if (shared()) {
-                    if (block->reference_counter.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                        details::deallocate(get_allocator(), block);
-                    }
-                } else {
-                    details::deallocate(get_allocator(), block);
-                }
-            }
-        }
-
-        constexpr char_type* allocate_exclusive_buffer(
-            const string_view_type str, const std::size_t capacity) {
-            const char_type* const str_data = str.data();
-            const std::size_t size = std::ranges::min(str.size(), capacity);
-            auto [block, actual_capacity] = details::allocate<char_type>(get_allocator(), capacity);
-            char_type* const data = block->template data<char_type>();
-            std::ranges::copy_n(str_data, size, data);
-            data[size] = char_type();
+        if constexpr (always_equal_alloc) {
             deallocate_if_needed();
-            this->storage.non_sso.size = size;
-            this->storage.non_sso.capacity = actual_capacity;
-            this->storage.non_sso.data = data;
-            this->control = reinterpret_cast<std::uintptr_t>(block) | 0b10;
-            return data;
+            set_states_on_copy(other);
+        } else if constexpr (POCCA) {
+            deallocate_if_needed();
+            static_cast<allocator_type&>(*this) = other.get_allocator();
+            set_states_on_copy(other);
+        } else if (this->get_allocator() == other.get_allocator() || !other.status().allocated) {
+            deallocate_if_needed();
+            set_states_on_copy(other);
+        } else {
+            // Can not share with source, do deep copy
+            *this = other.view();
         }
-
-        constexpr char_type* allocate_exclusive_buffer(const string_view_type str) {
-            return allocate_exclusive_buffer(str, str.size());
-        }
-
-        // Post-condition: exclusive
-        // Post-condition: const data == data
-        constexpr char_type* reserve_or_exclusive_shrink(const size_type new_cap) {
-            // Get new buffer if is shared with other strings or holds literal.
-            // In this case, new buffer always have capacity of new_cap regardless of current capacity.
-            // Tail contents are discarded if new_cap < size() here. (The 'exclusive shrink' branch)
-            if (!exclusive()) {
-                if (new_cap > this->sso_capacity) {
-                    return allocate_exclusive_buffer(view(), new_cap);
-                } else {
-                    return write_sso_buffer(subview(0, new_cap));
-                }
-            } else {
-                const size_type old_cap = capacity();
-                if (new_cap > old_cap) {
-                    // The auto growing branch
-                    return allocate_exclusive_buffer(view(), std::ranges::max(new_cap, old_cap * 2));
-                } else {
-                    // Already exclusive and having enough capacity
-                    // Nothing to do here.
-                    return data_unsafe();
-                }
-            }
-        }
-
-        constexpr char_type* exclusive_data() { return reserve_or_exclusive_shrink(size()); }
-
-        constexpr char_type* write_sso_buffer(const string_view_type str) noexcept {
-            const std::size_t size = str.size();
-            char_type* const data = sso_data();
-            std::ranges::copy_n(str.data(), size, data);
-            data[size] = char_type();
-            this->control = (size << 2);
-            return data;
-        }
-
-        constexpr char_type* write_allocated_buffer(const string_view_type str) {
-            const std::size_t size = str.size();
-            char_type* const data = allocated_data();
-            std::ranges::copy_n(str.data(), size, data);
-            data[size] = char_type();
-            this->storage.non_sso.size = size;
-            this->storage.non_sso.data = data;
-            return data;
-        }
-
-        constexpr char_type* sso_data() noexcept { return this->storage.small; }
-        constexpr const char_type* sso_data() const noexcept { return this->storage.small; }
-
-        constexpr char_type* allocated_data() noexcept {
-            return control_block()->template data<char_type>();
-        }
-
-        constexpr const char_type* allocated_data() const noexcept {
-            return this->storage.non_sso.data;
-        }
-
-        constexpr char_type* data_unsafe() noexcept {
-            if (allocated()) {
-                return allocated_data();
-            } else {
-                if (shared()) {
-                    std::unreachable();
-                } else {
-                    return sso_data();
-                }
-            }
-        }
-
-        constexpr const char_type* data_unsafe() const noexcept {
-            if (allocated()) {
-                return allocated_data();
-            } else {
-                if (shared()) {
-                    return this->storage.non_sso.data;
-                } else {
-                    return sso_data();
-                }
-            }
-        }
-    };
-
-    template<typename CharT, typename Alloc, typename U = CharT>
-    constexpr auto erase(basic_cow_string<CharT, Alloc>& c, const U& value)
-        -> typename basic_cow_string<CharT, Alloc>::size_type {
-        auto it = std::ranges::remove(c, value);
-        const auto count = std::ranges::distance(it, c.end());
-        c.erase(it, c.end());
-        return count;
+        return *this;
     }
 
-    template<typename CharT, typename Alloc, typename Pred>
-    constexpr auto erase_if(basic_cow_string<CharT, Alloc>& c, Pred pred)
-        -> typename basic_cow_string<CharT, Alloc>::size_type {
-        auto it = std::ranges::remove_if(c, std::move(pred));
-        const auto count = std::ranges::distance(it, c.end());
-        c.erase(it, c.end());
-        return count;
+    constexpr basic_cow_string& operator=(const basic_cow_string& other)
+        noexcept(noexcept(this->assign(other)))
+    {
+        return assign(other);
     }
 
-
-    inline namespace cow_string_operators {
-
-        template<typename CharT, typename Alloc1, typename Alloc2>
-        bool operator==(
-            const basic_cow_string<CharT, Alloc1>& lhs,
-            const basic_cow_string<CharT, Alloc2>& rhs) noexcept {
-            return lhs.view() == rhs.view();
+    constexpr basic_cow_string& assign(basic_cow_string&& other)
+        noexcept(always_equal_alloc || POCMA)
+    {
+        if (this == &other) {
+            return *this;
         }
-
-        template<typename CharT, typename Alloc1, typename Alloc2>
-        auto operator<=>(
-            const basic_cow_string<CharT, Alloc1>& lhs,
-            const basic_cow_string<CharT, Alloc2>& rhs) noexcept {
-            return lhs.view() <=> rhs.view();
+        if (always_equal_alloc) {
+            deallocate_if_needed();
+            set_states_on_move(std::move(other));
+        } else if constexpr (POCMA) {
+            deallocate_if_needed();
+            static_cast<allocator_type&>(*this) = static_cast<allocator_type&&>(other);
+            set_states_on_move(std::move(other));
+        } else if (this->get_allocator() == other.get_allocator() || !other.status().allocated) {
+            deallocate_if_needed();
+            set_states_on_move(std::move(other));
+        } else {
+            // Can not share with source, do deep copy
+            *this = other.view();
         }
+        return *this;
+    }
 
-        template<typename CharT, typename Alloc>
-        bool operator==(
-            const basic_cow_string<CharT, Alloc>& lhs,
-            const std::type_identity_t<std::basic_string_view<CharT>> rhs) noexcept {
-            return lhs.view() == rhs;
+    constexpr basic_cow_string& operator=(basic_cow_string&& other)
+        noexcept(noexcept(this->assign(std::move(other))))
+    {
+        return assign(std::move(other));
+    }
+
+    template<std::convertible_to<string_view_type> StringViewLike>
+        requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
+    constexpr basic_cow_string& assign(const StringViewLike& sv) {
+        const string_view_type view = sv;
+        if consteval {
+            write_static_string(view);
+        } else {
+            const auto* const data = view.data();
+            const size_type size = view.size();
+            resize_and_overwrite(view.size(), 
+                [data, size](char_type* p, size_type count) constexpr noexcept {
+                std::ranges::copy_n(data, size, p);
+                return count;
+            });
         }
+        return *this;
+    }
 
-        template<typename CharT, typename Alloc>
-        auto operator<=>(
-            const basic_cow_string<CharT, Alloc>& lhs,
-            const std::type_identity_t<std::basic_string_view<CharT>> rhs) noexcept {
-            return lhs.view() <=> rhs;
+    template<std::convertible_to<string_view_type> StringViewLike>
+        requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
+    constexpr basic_cow_string& operator=(const StringViewLike& sv) {
+        return assign(sv);
+    }
+
+    constexpr basic_cow_string& assign(char_type ch) {
+        return assign(string_view_type(&ch, 1));
+    }
+
+    constexpr basic_cow_string& operator=(char_type ch) {
+        return assign(ch);
+    }
+
+    constexpr basic_cow_string& assign(std::initializer_list<char_type> il) {
+        return assign(string_view_type(il));
+    }
+
+    constexpr basic_cow_string& operator=(std::initializer_list<char_type> il) {
+        return assign(il);
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    constexpr basic_cow_string& assign(Iter&& iter, Sent&& sent) {
+        if consteval {
+            write_static_string(std::forward<Iter>(iter), std::forward<Sent>(sent));
+        } else {
+            clear();
+            append(std::forward<Iter>(iter), std::forward<Sent>(sent));
         }
+        return *this;
+    }
 
-        template<typename CharT, typename Alloc1, typename Alloc2>
-        basic_cow_string<CharT, Alloc1> operator+(
-            const basic_cow_string<CharT, Alloc1>& lhs,
-            const basic_cow_string<CharT, Alloc2>& rhs) {
-            basic_cow_string<CharT, Alloc1> result = lhs;
-            result.append(rhs);
-            return result;
+    constexpr basic_cow_string& assign(size_type count, char_type ch) {
+        if consteval {
+            write_static_string(std::views::repeat(ch, count));
+        } else {
+            clear();
+            append_range(std::views::repeat(ch, count));
         }
+        return *this;
+    }
 
-        template<typename CharT, typename Alloc1, typename Alloc2>
-        basic_cow_string<CharT, Alloc1> operator+(
-            basic_cow_string<CharT, Alloc1>&& lhs,
-            const basic_cow_string<CharT, Alloc2>& rhs) {
-            lhs.append(rhs);
-            return std::move(lhs);
+    constexpr basic_cow_string& assign(const char_type* s, size_type count) {
+        return assign(string_view_type(s, count));
+    }
+
+    constexpr basic_cow_string& assign(const basic_cow_string& str,
+                                       size_type pos, size_type count = npos)
+    {
+        basic_cow_string(str, pos, count).swap(*this);
+        return *this;
+    }
+
+    constexpr basic_cow_string& assign(basic_cow_string&& str,
+                                       size_type pos, size_type count = npos)
+    {
+        basic_cow_string(std::move(str), pos, count).swap(*this);
+        return *this;
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    constexpr basic_cow_string& assign_range(R&& r) {
+        auto rg = std::forward<R>(r);
+        return assign(std::ranges::begin(rg), std::ranges::end(rg));
+    }
+
+    constexpr void clear() noexcept {
+        if consteval {
+            contract_assert(!status().allocated);
+            std::start_lifetime(storage.sso);
+            storage.sso = {};
+        } else {
+            resize(0);
         }
+    }
 
-        template<typename CharT, typename Alloc>
-        basic_cow_string<CharT, Alloc> operator+(
-            const basic_cow_string<CharT, Alloc>& lhs,
-            const std::type_identity_t<std::basic_string_view<CharT>> rhs) noexcept {
-            basic_cow_string<CharT, Alloc> result = lhs;
-            result.append(rhs);
-            return result;
+    constexpr void shrink_to_fit() {
+        if (status().allocated) {
+            if (size() <= storage.sso.capacity) {
+                // Use a temporary buffer to move the content to SSO storage
+                // SSO capacity is small, should be fine
+                const string_view_type original = view();
+                char_type buffer[storage.sso.capacity] = {};
+                std::ranges::copy_n(original.data(), original.size(), buffer);
+                deallocate_if_needed();
+                write_sso(string_view_type(buffer, original.size()));
+            } else if (!exclusive() || size() < capacity()) {
+                allocate_exclusive_buffer(view());
+            }
         }
+    }
 
-        template<typename CharT, typename Alloc>
-        basic_cow_string<CharT, Alloc> operator+(
-            basic_cow_string<CharT, Alloc>&& lhs,
-            const std::type_identity_t<std::basic_string_view<CharT>> rhs) noexcept {
-            lhs.append(rhs);
-            return std::move(lhs);
+    constexpr void reserve(const size_type new_cap) {
+        if !consteval {
+            reserve_or_exclusive_shrink(std::ranges::max(new_cap, capacity()));
         }
+    }
 
-        template<typename CharT, typename Alloc>
-        basic_cow_string<CharT, Alloc> operator+(
-            const std::type_identity_t<std::basic_string_view<CharT>> lhs,
-            const basic_cow_string<CharT, Alloc>& rhs) noexcept {
-            basic_cow_string<CharT, Alloc> result;
-            result.reserve(lhs.size() + rhs.size());
-            result.append(lhs);
-            result.append(rhs);
-            return result;
-        }
+    pointer data() post (exclusive()) { return exclusive_data(); }
+    iterator begin() post (exclusive()) { return data(); }
+    iterator end() post (exclusive()) { return data() + size(); }
+    reverse_iterator rbegin() post (exclusive()) { return reverse_iterator(end()); }
+    reverse_iterator rend() post (exclusive()) { return reverse_iterator(begin()); }
+    reference front() pre (!empty()) post (exclusive()) { return exclusive_data()[0]; }
+    reference back() pre (!empty()) post (exclusive()) { return exclusive_data()[size() - 1]; }
 
-        template<typename CharT, typename Alloc>
-        basic_cow_string<CharT, Alloc> operator+(
-            const std::type_identity_t<std::basic_string_view<CharT>> lhs,
-            basic_cow_string<CharT, Alloc>&& rhs) noexcept {
-            rhs.insert(0, lhs);
-            return std::move(rhs);
-        }
-
-    } // namespace cow_string_operators
-
-    namespace literals::inline cow_string_literals {
-
-        template<details::cow_string_literal_helper helper>
-        consteval auto operator""_cowstr() -> typename decltype(helper)::cow_string_type {
-            return helper.literal;
-        }
-
-    } // namespace literals::cow_string_literals
-
-    using cow_string = basic_cow_string<char>;
-    using cow_wstring = basic_cow_string<wchar_t>;
-    using cow_u8string = basic_cow_string<char8_t>;
-    using cow_u16string = basic_cow_string<char16_t>;
-    using cow_u32string = basic_cow_string<char32_t>;
+    reference operator[](size_type pos)
+        pre (pos < size())
+        post (exclusive())
+    {
+        return exclusive_data()[pos];
+    }
     
-    static_assert(sizeof(cow_string) == 4 * sizeof(void*));
+    reference at(size_type pos)
+        post (exclusive())
+    {
+        check_index(pos);
+        return exclusive_data()[pos];
+    }
 
-} // namespace mylib
+    template<std::invocable<char_type*, size_type> Operation>
+    void resize_and_overwrite(size_type count, Operation op)
+        post (exclusive())
+    {
+        // get necessary storage
+        char_type* const p = reserve_or_exclusive_shrink(count);
+        // now exclusive
+        size_type r = std::move(op)(p, count);
+        contract_assert(r <= count);
+        if (status().allocated) {
+            storage.dyn.size = r;
+        } else {
+            storage.sso.size = r;
+        }
+        p[r] = char_type();
+    }
+
+    void resize(size_type new_size, char_type ch = char_type())
+        post (exclusive())
+    {
+        const size_type old_size = size();
+        resize_and_overwrite(new_size,
+            [ch, old_size](char_type* p, size_type count) noexcept {
+            if (count > old_size) {
+                std::ranges::fill(p + old_size, p + count, ch);
+            }
+            return count;
+        });
+    }
+
+    void push_back(char_type ch)
+        post (exclusive())
+    {
+        const size_type old_size = size();
+        resize_and_overwrite(old_size + 1,
+            [ch, old_size](char_type* p, size_type count) noexcept {
+            p[old_size] = ch;
+            return count;
+        });
+    }
+
+    void pop_back() pre (!empty()) post (exclusive()) { resize(size() - 1); }
+    
+    basic_cow_string& append(size_type count, char_type ch)
+        post (exclusive())
+    {
+        resize(size() + count, ch);
+        return *this;
+    }
+
+    basic_cow_string& append(string_view_type sv, size_type pos, size_type count = npos)
+        post (exclusive())
+    {
+        const string_view_type view = string_view_type(sv).substr(pos, count);
+        const size_type old_size = size();
+        const size_type add_size = view.size();
+        resize_and_overwrite(old_size + add_size,
+            [old_size, add_size, view](char_type* p, size_type count) noexcept {
+            std::ranges::copy_n(view.data(), add_size, p + old_size);
+            return count;
+        });
+        return *this;
+    }
+
+    basic_cow_string& append(string_view_type sv)
+        post (exclusive())
+    {
+        return append(sv, 0, npos);
+    }
+
+    basic_cow_string& append(const char_type* s, size_type count)
+        post (exclusive())
+    {
+        return append(string_view_type(s, count));
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    basic_cow_string& append(Iter&& iter, Sent&& sent)
+        post (exclusive())
+    {
+        const size_type old_size = size();
+        auto i = std::forward<Iter>(iter);
+        auto s = std::forward<Sent>(sent);
+        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
+            // push_back fallback
+            basic_cow_string temp(view(), get_allocator());
+            for (; i != s; ++i) {
+                temp.push_back(*i);
+            }
+            *this = std::move(temp);
+        } else {
+            const size_type add_size = std::ranges::distance(i, s);
+            resize_and_overwrite(old_size + add_size,
+                [old_size, add_size, &i](char_type* p, size_type count) noexcept {
+                std::ranges::copy_n(i, add_size, p + old_size);
+                return count;
+            });
+        }
+        return *this;
+    }
+
+    basic_cow_string& append(std::initializer_list<char_type> il)
+        post (exclusive())
+    {
+        return append(string_view_type(il));
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    basic_cow_string& append_range(R&& r)
+        post (exclusive())
+    {
+        auto rg = std::forward<R>(r);
+        // TODO: add approximately_sized_range branch when supported
+        return append(std::ranges::begin(rg), std::ranges::end(rg));
+    }
+
+    basic_cow_string& operator+=(string_view_type sv)
+        post (exclusive())
+    {
+        return append(sv);
+    }
+
+    basic_cow_string& operator+=(char_type ch)
+        post (exclusive())
+    {
+        push_back(ch);
+        return *this;
+    }
+
+    basic_cow_string& operator+=(std::initializer_list<char_type> il)
+        post (exclusive())
+    {
+        return append(il);
+    }
+
+    basic_cow_string& insert(size_type index, size_type count, char_type ch)
+        post (exclusive())
+    {
+        check_index(index);
+        const size_type old_size = size();
+        resize_and_overwrite(old_size + count,
+            [index, count, ch, old_size](char_type* p, size_type new_size) noexcept {
+            std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+            std::ranges::fill_n(p + index, count, ch);
+            return new_size;
+        });
+        return *this;
+    }
+
+    basic_cow_string& insert(size_type index, char_type ch)
+        post (exclusive())
+    {
+        return insert(index, 1, ch);
+    }
+
+    basic_cow_string& insert(size_type index, string_view_type str)
+        post (exclusive())
+    {
+        check_index(index);
+        const size_type old_size = size();
+        const size_type add_size = str.size();
+        resize_and_overwrite(old_size + add_size,
+            [index, add_size, str, old_size](char_type* p, size_type new_size) noexcept {
+            std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+            std::ranges::copy_n(str.data(), add_size, p + index, p + new_size);
+            return new_size;
+        });
+        return *this;
+    }
+
+    basic_cow_string& insert(size_type index, const char_type* s, size_type count)
+        post (exclusive())
+    {
+        return insert(index, string_view_type(s, count));
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    basic_cow_string& insert(size_type index, Iter&& iter, Sent&& sent)
+        post (exclusive())
+    {
+        check_index(index);
+        const size_type old_size = size();
+        auto i = std::forward<Iter>(iter);
+        auto s = std::forward<Sent>(sent);
+        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
+            // push_back fallback
+            basic_cow_string temp = substr(0, index);
+            try {
+                for (; i != s; ++i) {
+                    temp.push_back(*i);
+                }
+            } catch (...) {
+                throw;
+            }
+            temp.append(subview(index, npos));
+            swap(temp);
+        } else {
+            const size_type add_size = std::ranges::distance(i, s);
+            resize_and_overwrite(old_size + add_size,
+                [index, add_size, old_size, &i](char_type* p, size_type new_size) noexcept {
+                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+                std::ranges::copy_n(i, add_size, p + index);
+                return new_size;
+            });
+        }
+        return *this;
+    }
+
+    basic_cow_string& insert(size_type index, std::initializer_list<char_type> il)
+        post (exclusive())
+    {
+        return insert(index, il.begin(), il.end());
+    }
+
+    iterator insert(const_iterator pos, size_type count, char_type ch)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        const size_type index = pos - cbegin();
+        insert(index, count, ch);
+        return begin() + index;
+    }
+
+    iterator insert(const_iterator pos, char_type ch)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        return insert(pos, 1, ch);
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    iterator insert(const_iterator pos, Iter&& iter, Sent&& sent)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        const size_type index = pos - cbegin();
+        insert(index, std::forward<Iter>(iter), std::forward<Sent>(sent));
+        return begin() + index;
+    }
+
+    iterator insert(const_iterator pos, std::initializer_list<char_type> il)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        return insert(pos, il.begin(), il.end());
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    iterator insert_range(const_iterator pos, R&& r)
+        pre (cbegin() <= pos && pos <= cend())
+        post (exclusive())
+    {
+        auto rg = std::forward<R>(r);
+        return insert(pos, std::ranges::begin(rg), std::ranges::end(rg));
+    }
+
+    basic_cow_string& erase(size_type index = 0, size_type count = npos)
+        post (exclusive())
+    {
+        check_index(index);
+        const size_type old_size = size();
+        if (old_size - index <= count) {
+            resize(index);
+            return *this;
+        }
+        char_type* const data = exclusive_data();
+        std::ranges::copy(data + index + count, data + old_size, data + index);
+        resize(old_size - count);
+        return *this;
+    }
+
+    iterator erase(const_iterator pos)
+        pre (cbegin() <= pos && pos < cend())
+        post (exclusive())
+    {
+        const size_type index = pos - cbegin();
+        erase(index, 1);
+        return begin() + index;
+    }
+
+    iterator erase(const_iterator first, const_iterator last)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        erase(index, count);
+        return begin() + index;
+    }
+
+    basic_cow_string& replace(size_type pos, size_type count, string_view_type str)
+        post (exclusive())
+    {
+        check_index(pos);
+        const size_type old_size = size();
+        if (old_size - pos <= count) {
+            resize(pos);
+            return append(str);
+        }
+        const size_type rcount = std::ranges::min(count, old_size - pos);
+        const size_type add_size = str.size();
+        const size_type new_size = old_size - rcount + add_size;
+        if (new_size > old_size) {
+            resize(new_size);
+            char_type* const data = storage.data();
+            std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+            std::ranges::copy_n(str.data(), add_size, data + pos);
+        } else {
+            char_type* const data = exclusive_data();
+            std::ranges::copy_n(str.data(), add_size, data + pos);
+            std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+            resize(new_size);
+        }
+        return *this;
+    }
+
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+        const string_view_type str)
+        post (exclusive())
+    {
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, str);
+    }
+
+    basic_cow_string& replace(const size_type pos, const size_type count,
+        const char_type* cstr, const size_type count2)
+        post (exclusive())
+    {
+        return replace(pos, count, string_view_type(cstr, count2));
+    }
+
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+        const char_type* cstr, size_type count2)
+        post (exclusive())
+    {
+        return replace(first, last, string_view_type(cstr, count2));
+    }
+
+    basic_cow_string& replace(size_type pos, size_type count,
+                              size_type count2, char_type ch)
+        post (exclusive())
+    {
+        check_index(pos);
+        const size_type old_size = size();
+        if (old_size - pos <= count) {
+            resize(pos);
+            return append(count2, ch);
+        }
+        const size_type rcount = std::ranges::min(count, old_size - pos);
+        const size_type add_size = count2;
+        const size_type new_size = old_size - rcount + add_size;
+        if (new_size > old_size) {
+            resize(new_size);
+            char_type* const data = storage.data();
+            std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+            std::ranges::fill_n(data + pos, add_size, ch);
+        } else {
+            char_type* const data = exclusive_data();
+            std::ranges::fill_n(data + pos, add_size, ch);
+            std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+            resize(new_size);
+        }
+        return *this;
+    }
+    
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+                              size_type count2, char_type ch)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, count2, ch);
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    basic_cow_string& replace(size_type pos, size_type count,
+                              Iter&& iter, Sent&& sent)
+        post (exclusive())
+    {
+        check_index(pos);
+        const size_type old_size = size();
+        auto i = std::forward<Iter>(iter);
+        [[maybe_unused]]
+        auto s = std::forward<Sent>(sent);
+        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
+            // push_back fallback
+            basic_cow_string temp = substr(0, pos);
+            try {
+                for (; i != s; ++i) {
+                    temp.push_back(*i);
+                }
+            } catch (...) {
+                throw;
+            }
+            if (old_size - pos > count) {
+                temp.append(subview(pos + count, npos));
+            }
+            swap(temp);
+        } else {
+            if (old_size - pos <= count) {
+                resize(pos);
+                return append(std::forward<Iter>(i), std::forward<Sent>(s));
+            }
+            const size_type rcount = std::ranges::min(count, old_size - pos);
+            const size_type add_size = std::ranges::distance(i, s);
+            const size_type new_size = old_size - rcount + add_size;
+            if (new_size > old_size) {
+                resize(new_size);
+                char_type* const data = storage.data();
+                std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+                std::ranges::move(i, s, data + pos);
+            } else {
+                char_type* const data = exclusive_data();
+                std::ranges::move(i, s, data + pos);
+                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+                resize(new_size);
+            }
+        }
+        return *this;
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+                              Iter&& iter, Sent&& sent)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, std::forward<Iter>(iter), std::forward<Sent>(sent));
+    }
+
+    basic_cow_string& replace(size_type pos, size_type count,
+                              std::initializer_list<char_type> il)
+        post (exclusive())
+    {
+        return replace(pos, count, il.begin(), il.end());
+    }
+
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+                              std::initializer_list<char_type> il)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        return replace(first, last, il.begin(), il.end());
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    basic_cow_string& replace_with_range(size_type pos, size_type count, R&& r)
+        post (exclusive())
+    {
+        auto rg = std::forward<R>(r);
+        return replace(pos, count, std::ranges::begin(rg), std::ranges::end(rg));
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    basic_cow_string& replace_with_range(const_iterator first, const_iterator last, R&& r)
+        pre (cbegin() <= first && first <= last && last <= cend())
+        post (exclusive())
+    {
+        auto rg = std::forward<R>(r);
+        return replace(first, last, std::ranges::begin(rg), std::ranges::end(rg));
+    }
+
+private:
+    storage_type storage = {};
+};
+
+using cow_string = basic_cow_string<char>;
+using cow_wstring = basic_cow_string<wchar_t>;
+using cow_u8string = basic_cow_string<char8_t>;
+using cow_u16string = basic_cow_string<char16_t>;
+using cow_u32string = basic_cow_string<char32_t>;
+
+namespace literals::inline cow_string_literals {
+
+    consteval cow_string operator""_cows(const char* str, std::size_t) { return str; }
+    consteval cow_wstring operator""_cows(const wchar_t* str, std::size_t) { return str; }
+    consteval cow_u8string operator""_cows(const char8_t* str, std::size_t) { return str; }
+    consteval cow_u16string operator""_cows(const char16_t* str, std::size_t) { return str; }
+    consteval cow_u32string operator""_cows(const char32_t* str, std::size_t) { return str; }
+
+} // namespace literals::cow_string_literals
+
+} // namespace cow
 
 namespace std {
 
-    template<typename CharT, typename Allocator, typename TargetCharT>
-    struct formatter<mylib::basic_cow_string<CharT, Allocator>, TargetCharT>
-        : private formatter<basic_string_view<CharT>, TargetCharT>
-    {
-        using arg = mylib::basic_cow_string<CharT, Allocator>;
-        using base = std::formatter<basic_string_view<CharT>, CharT>;
-        using base::parse;
+template<typename CharT, typename Allocator, typename TargetCharT>
+struct formatter<cow::basic_cow_string<CharT, Allocator>, TargetCharT>
+    : private formatter<basic_string_view<CharT>, TargetCharT>
+{
+    using cow_string = cow::basic_cow_string<CharT, Allocator>;
+    using base = std::formatter<basic_string_view<CharT>, TargetCharT>;
+    using base::parse;
 
-        template<typename FormatContext>
-        auto format(const arg& str, FormatContext& ctx) const {
-            return base::format(str.view(), ctx);
-        }
-    };
+    template<typename FormatContext>
+    auto format(const cow_string& str, FormatContext& ctx) const {
+        return base::format(str.view(), ctx);
+    }
+};
 
-    template<typename CharT, typename Allocator>
-    struct hash<mylib::basic_cow_string<CharT, Allocator>> {
-        using argument_type = mylib::basic_cow_string<CharT, Allocator>;
-        using result_type = std::size_t;
+template<typename CharT, typename Allocator>
+struct hash<cow::basic_cow_string<CharT, Allocator>> {
+    using cow_string = cow::basic_cow_string<CharT, Allocator>;
+    using result_type = std::size_t;
 
-        result_type operator()(const argument_type& str) const noexcept {
-            return std::hash<std::basic_string_view<CharT>>{}(str.view());
-        }
-    };
+    result_type operator()(const cow_string& str) const noexcept {
+        return std::hash<std::basic_string_view<CharT>>{}(str.view());
+    }
+};
 
 } // namespace std
 

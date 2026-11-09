@@ -266,6 +266,7 @@ private:
         && std::is_same_v<std::remove_pointer_t<pointer>, char_type>);
     using storage_type = details::storage<char_type, size_type>;
     static_assert(sizeof(storage_type) == sizeof(storage_type::dyn));
+    static constexpr size_type growing_factor = 2;
 
     // Allocator strategy of cow_string
     // On copy:
@@ -428,8 +429,10 @@ private:
             const size_type old_cap = capacity();
             if (new_cap > old_cap) {
                 // The auto growing branch
-                const size_type growing = std::saturating_mul(old_cap, size_type(2));
-                return allocate_exclusive_buffer(view(), std::ranges::max(new_cap, growing));
+                const size_type grow = std::saturating_mul(old_cap, growing_factor);
+                const size_type ceil_grow = std::ranges::min(grow, max_size());
+                const size_type final_cap = std::ranges::max(new_cap, ceil_grow);
+                return allocate_exclusive_buffer(view(), final_cap);
             } else {
                 // Already exclusive and having enough capacity
                 // Nothing to do here.

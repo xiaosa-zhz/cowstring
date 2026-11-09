@@ -100,7 +100,7 @@ union storage {
 
     static_assert(sizeof(dyn) == sizeof(sta) && sizeof(dyn) == sizeof(sso));
 
-    constexpr status status() const noexcept {
+    constexpr details::status status() const noexcept {
         if consteval {
             if (std::is_within_lifetime(&sso)) {
                 return small;

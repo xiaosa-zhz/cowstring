@@ -22,6 +22,17 @@ toolchain("gcc-trunk")
     set_toolset("ranlib", path.join(gcc_trunk_dir, "bin/gcc-ranlib"))
     set_runtimes("stdc++_static", "stdc++_shared")
     on_load(function (toolchain)
+        local libdirs = {}
+        for _, name in ipairs({"lib64", "lib"}) do
+            local dir = path.join(toolchain:sdkdir(), name)
+            if os.isdir(dir) then
+                table.insert(libdirs, dir)
+            end
+        end
+        toolchain:add("linkdirs",  libdirs)
+        toolchain:add("rpathdirs", libdirs)
+        toolchain:add("runenvs", "LD_LIBRARY_PATH", table.unpack(libdirs))
+
         local march
         if toolchain:is_arch("x86_64", "x64") then
             march = "-m64"
@@ -42,6 +53,7 @@ target("cowstring")
     set_toolchains("gcc-trunk")
     set_runtimes("stdc++_shared")
     add_cxxflags("-freflection", {force = true})
+    add_cxxflags("-fcontracts", {force = true})
     add_linkdirs("/usr/local/lib/x86_64-unknown-linux-gnu")
     add_rpathdirs("/usr/local/lib/x86_64-unknown-linux-gnu")
 

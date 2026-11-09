@@ -1,6 +1,0 @@
-[
-{
-  "directory": "/home/zhz/src/cowstring",
-  "arguments": ["/home/zhz/opt/gcc-trunk/bin/g++", "-c", "-m64", "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-O3", "-std=c++26", "-Iincludes", "-finput-charset=UTF-8", "-fexec-charset=UTF-8", "-freflection", "-DNDEBUG", "-o", "build/.objs/cowstring/linux/x86_64/release/src/main.cpp.o", "src/main.cpp"],
-  "file": "src/main.cpp"
-}]

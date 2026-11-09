@@ -579,8 +579,8 @@ public:
     constexpr const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
     constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
     constexpr const_reverse_iterator crend() const noexcept { return rend(); }        
-    constexpr const_reference front() const noexcept pre (size() > 0) { return view().front(); }
-    constexpr const_reference back() const noexcept pre (size() > 0) { return view().back(); }
+    constexpr const_reference front() const noexcept pre (!empty()) { return view().front(); }
+    constexpr const_reference back() const noexcept pre (!empty()) { return view().back(); }
     constexpr const_reference operator[](size_type pos) const noexcept pre (pos < size()) { return view()[pos]; }
 
     constexpr const_reference at(size_type pos) const {
@@ -901,60 +901,6 @@ public:
         return assign(std::ranges::begin(rg), std::ranges::end(rg));
     }
 
-    pointer data() { return exclusive_data(); }
-    iterator begin() { return data(); }
-    iterator end() { return data() + size(); }
-    reverse_iterator rbegin() { return reverse_iterator(end()); }
-    reverse_iterator rend() { return reverse_iterator(begin()); }
-    reference front() pre (size() > 0) { return exclusive_data()[0]; }
-    reference back() pre (size() > 0) { return exclusive_data()[size() - 1]; }
-    reference operator[](size_type pos) pre (pos < size()) { return exclusive_data()[pos]; }
-    
-    reference at(size_type pos) {
-        if (pos < size()) {
-            return exclusive_data()[pos];
-        }
-        throw std::out_of_range("basic_cow_string::at: position out of range");
-    }
-
-    constexpr void reserve(const size_type new_cap) {
-        if !consteval {
-            reserve_or_exclusive_shrink(std::ranges::max(new_cap, capacity()));
-        }
-    }
-
-    template<std::invocable<char_type*, size_type> Operation>
-    void resize_and_overwrite(size_type count, Operation op) {
-        // get necessary storage
-        char_type* const p = reserve_or_exclusive_shrink(count);
-        // now exclusive
-        size_type r = std::move(op)(p, count);
-        contract_assert(r <= count);
-        if (status().allocated) {
-            storage.dyn.size = r;
-        } else {
-            storage.sso.size = r;
-        }
-        p[r] = char_type();
-    }
-
-    constexpr void resize(const size_type new_size, const char_type ch = char_type()) {
-        if consteval {
-            string_type temp = string();
-            temp.resize(new_size, ch);
-            write_static_string(temp);
-        } else {
-            const size_type old_size = size();
-            resize_and_overwrite(new_size,
-                [ch, old_size](char_type* p, size_type count) noexcept {
-                if (count > old_size) {
-                    std::ranges::fill(p + old_size, p + count, ch);
-                }
-                return count;
-            });
-        }
-    }
-
     constexpr void clear() noexcept {
         if consteval {
             contract_assert(!status().allocated);
@@ -975,6 +921,138 @@ public:
                 allocate_exclusive_buffer(view());
             }
         }
+    }
+
+    constexpr void reserve(const size_type new_cap) {
+        if !consteval {
+            reserve_or_exclusive_shrink(std::ranges::max(new_cap, capacity()));
+        }
+    }
+
+    pointer data() { return exclusive_data(); }
+    iterator begin() { return data(); }
+    iterator end() { return data() + size(); }
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
+    reference front() pre (!empty()) { return exclusive_data()[0]; }
+    reference back() pre (!empty()) { return exclusive_data()[size() - 1]; }
+    reference operator[](size_type pos) pre (pos < size()) { return exclusive_data()[pos]; }
+    
+    reference at(size_type pos) {
+        if (pos < size()) {
+            return exclusive_data()[pos];
+        }
+        throw std::out_of_range("basic_cow_string::at: position out of range");
+    }
+
+    template<std::invocable<char_type*, size_type> Operation>
+    void resize_and_overwrite(size_type count, Operation op) {
+        // get necessary storage
+        char_type* const p = reserve_or_exclusive_shrink(count);
+        // now exclusive
+        size_type r = std::move(op)(p, count);
+        contract_assert(r <= count);
+        if (status().allocated) {
+            storage.dyn.size = r;
+        } else {
+            storage.sso.size = r;
+        }
+        p[r] = char_type();
+    }
+
+    void resize(size_type new_size, char_type ch = char_type()) {
+        const size_type old_size = size();
+        resize_and_overwrite(new_size,
+            [ch, old_size](char_type* p, size_type count) noexcept {
+            if (count > old_size) {
+                std::ranges::fill(p + old_size, p + count, ch);
+            }
+            return count;
+        });
+    }
+
+    void push_back(char_type ch) {
+        const size_type old_size = size();
+        resize_and_overwrite(old_size + 1,
+            [ch, old_size](char_type* p, size_type count) noexcept {
+            p[old_size] = ch;
+            return count;
+        });
+    }
+
+    void pop_back() pre (!empty()) { resize(size() - 1); }
+
+    basic_cow_string& append(size_type count, char_type ch) {
+        resize(size() + count, ch);
+        return *this;
+    }
+
+    basic_cow_string& append(string_view_type sv, size_type pos, size_type count = npos) {
+        const string_view_type view = string_view_type(sv).substr(pos, count);
+        const size_type old_size = size();
+        const size_type add_size = view.size();
+        resize_and_overwrite(old_size + add_size,
+            [old_size, add_size, view](char_type* p, size_type count) noexcept {
+            std::ranges::copy_n(view.data(), add_size, p + old_size);
+            return count;
+        });
+        return *this;
+    }
+
+    basic_cow_string& append(string_view_type sv) {
+        return append(sv, 0, npos);
+    }
+
+    basic_cow_string& append(const char_type* s, size_type count) {
+        return append(string_view_type(s, count));
+    }
+
+    template<typename Iter, typename Sent>
+        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    basic_cow_string& append(Iter&& iter, Sent&& sent) {
+        const size_type old_size = size();
+        auto i = std::forward<Iter>(iter);
+        auto s = std::forward<Sent>(sent);
+        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
+            // push_back fallback
+            basic_cow_string temp(view(), get_allocator());
+            for (; i != s; ++i) {
+                temp.push_back(*i);
+            }
+            *this = std::move(temp);
+        } else {
+            const size_type add_size = std::ranges::distance(i, s);
+            resize_and_overwrite(old_size + add_size,
+                [old_size, add_size, &i](char_type* p, size_type count) noexcept {
+                std::ranges::copy_n(i, add_size, p + old_size);
+                return count;
+            });
+        }
+        return *this;
+    }
+
+    basic_cow_string& append(std::initializer_list<char_type> il) {
+        return append(string_view_type(il));
+    }
+
+    template<details::container_compatible_range<char_type> R>
+    basic_cow_string& append_range(R&& r) {
+        auto rg = std::forward<R>(r);
+        // TODO: add approximately_sized_range branch when supported
+        return append(std::ranges::begin(rg), std::ranges::end(rg));
+    }
+
+    basic_cow_string& operator+=(string_view_type sv) {
+        return append(sv);
+    }
+
+    basic_cow_string& operator+=(const char_type ch) {
+        push_back(ch);
+        return *this;
+    }
+
+    basic_cow_string& operator+=(std::initializer_list<char_type> il) {
+        return append(il);
     }
 
 private:

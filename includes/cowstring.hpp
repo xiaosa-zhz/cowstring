@@ -286,15 +286,16 @@ private:
         post (!status().allocated)
     {
         string_type test(std::from_range, std::forward<R>(r));
-        if (test.size() <= storage.sso.capacity) {
-            write_sso(test);
-        } else {
+        if (test.size() > storage.sso.capacity) {
             std::start_lifetime(storage.sta);
             storage.sta = { .data = std::define_static_string(test), .size = test.size() };
+        } else {
+            write_sso(test);
         }
     }
 
     constexpr char_type* write_sso(string_view_type view) noexcept
+        pre (!status().allocated)
         pre (view.size() <= storage.sso.capacity)
         post (status() == details::small)
     {
@@ -309,20 +310,19 @@ private:
         return storage.sso.data;
     }
 
-    // Copy `view` into the sso buffer and then release the old allocated block.
-    // `view` may alias the sso buffer (small string) or point into storage.dyn.
-    constexpr char_type* write_sso_release(string_view_type view) noexcept {
-        if (!status().allocated) {
-            return write_sso(view);
-        }
-        const auto old = storage.dyn;
-        const bool last_owner = !old.shared
-            || ref_count().fetch_sub(1, std::memory_order_acq_rel) == 1;
-        char_type* const result = write_sso(view);
-        if (last_owner) {
-            details::deallocate(get_allocator(), { old.data, old.capacity });
-        }
-        return result;
+    // Copy content of view into SSO buffer, view is referencing current object.
+    // Then release the old dynamic storage if needed.
+    constexpr char_type* write_sso_release(string_view_type view) noexcept
+        pre (view.size() <= storage.sso.capacity)
+        post (status() == details::small)
+    {
+        // Use a temporary buffer to move the content to SSO storage
+        // SSO capacity is small, should be fine
+        const std::size_t size = view.size();
+        char_type buffer[storage.sso.capacity] = {};
+        std::ranges::copy_n(view.data(), size, buffer);
+        deallocate_if_needed();
+        return write_sso(string_view_type(buffer, size));
     }
 
     std::atomic_ref<std::size_t> ref_count() const noexcept
@@ -740,7 +740,15 @@ public:
             } else if (exclusive()) {
                 if (pos > 0) {
                     const string_view_type sub = subview(pos, count);
-                    write_sso_release(sub);
+                    if (sub.size() > storage.sso.capacity) {
+                        contract_assert(status() == details::owned);
+                        char_type* const data = storage.data();
+                        std::ranges::copy_n(sub.data(), sub.size(), data);
+                        data[sub.size()] = char_type();
+                        storage.dyn.size = sub.size();
+                    } else {
+                        write_sso_release(sub);
+                    }
                 } else if (count < original_size) {
                     resize(count);
                 }
@@ -950,15 +958,11 @@ public:
     }
 
     constexpr void shrink_to_fit() {
+        // reserve_or_exclusive_shrink won't shrink
+        // so we have to do it ourselves
         if (status().allocated) {
             if (size() <= storage.sso.capacity) {
-                // Use a temporary buffer to move the content to SSO storage
-                // SSO capacity is small, should be fine
-                const string_view_type original = view();
-                char_type buffer[storage.sso.capacity] = {};
-                std::ranges::copy_n(original.data(), original.size(), buffer);
-                deallocate_if_needed();
-                write_sso(string_view_type(buffer, original.size()));
+                write_sso_release(view());
             } else if (!exclusive() || size() < capacity()) {
                 allocate_exclusive_buffer(view());
             }

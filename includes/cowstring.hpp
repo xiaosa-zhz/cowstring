@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <initializer_list>
 #include <ranges>
+#include <functional>
+#include <limits>
 
 namespace cow {
 
@@ -160,14 +162,21 @@ struct allocation {
     std::size_t capacity = 0;
 };
 
+template<typename SizeT>
+inline constexpr SizeT cow_max_size = SizeT(1) << (sizeof(SizeT) * CHAR_BIT - 2);
+
 template<typename Alloc, typename Traits = std::allocator_traits<Alloc>>
 allocation<typename Traits::value_type> allocate(const Alloc& source, std::size_t capacity) {
     using allocator = Traits::template rebind_alloc<std::size_t>;
     using traits = std::allocator_traits<allocator>;
     using value_type = Traits::value_type;
+    using size_type = traits::size_type;
     static_assert(sizeof(std::size_t) >= sizeof(value_type)
                && alignof(std::size_t) >= alignof(value_type));
     allocator alloc(source);
+    if (capacity > cow_max_size<size_type>) {
+        throw std::length_error("basic_cow_string: capacity too large");
+    }
     const std::size_t total_size =
         (sizeof(value_type) * (capacity + 1) + sizeof(std::size_t) - 1) / sizeof(std::size_t) + 1;
     std::size_t* block = traits::allocate(alloc, total_size);
@@ -370,7 +379,7 @@ private:
             // owned or shared string
             // steal from source and set it to sso empty string
             storage = other.storage;
-            std::start_lifetime(storage.sso);
+            std::start_lifetime(other.storage.sso);
             other.storage.sso = {};
         } else {
             storage = other.storage;
@@ -430,8 +439,16 @@ private:
 
     char_type* exclusive_data() { return reserve_or_exclusive_shrink(size()); }
 
+    // at(index) throw when index pass the end.
     void check_index(size_type index) const {
         if (index >= size()) {
+            throw std::out_of_range("basic_cow_string: out of range");
+        }
+    }
+
+    // insert/erase/replace allow pass-the-end position
+    void check_pos(size_type index) const {
+        if (index > size()) {
             throw std::out_of_range("basic_cow_string: out of range");
         }
     }
@@ -439,7 +456,10 @@ private:
 public:
     constexpr explicit basic_cow_string(const allocator_type& alloc) noexcept
         : allocator_type(alloc)
-    {}
+    {
+        std::start_lifetime(storage.sso);
+        storage.sso = {};
+    }
 
     constexpr basic_cow_string()
         noexcept(std::is_nothrow_default_constructible_v<allocator_type>)
@@ -591,7 +611,7 @@ public:
     // For testing purposes only
     // Maybe inaccurate in concurrent scenarios
     std::size_t cur_count() const noexcept {
-        if (!status().shared) {
+        if (!status().allocated) {
             return 0;
         }
         return ref_count().load(std::memory_order_relaxed);
@@ -615,6 +635,7 @@ public:
         return false;
     }
 
+    static consteval size_type max_size() noexcept { return details::cow_max_size<size_type>; }
     constexpr size_type size() const noexcept { return storage.size(); }
     constexpr size_type capacity() const noexcept { return storage.capacity(); }
     constexpr size_type length() const noexcept { return size(); }
@@ -758,6 +779,11 @@ public:
             }
         }
     }
+
+    constexpr bool operator==(const basic_cow_string& other) const noexcept { return view() == other.view(); }
+    constexpr bool operator==(string_view_type other) const noexcept { return view() == other; }
+    constexpr auto operator<=>(const basic_cow_string& other) const noexcept { return view() <=> other.view(); }
+    constexpr auto operator<=>(string_view_type other) const noexcept { return view() <=> other; }
 
     // Modifying methods
 
@@ -943,8 +969,7 @@ public:
 
     template<details::container_compatible_range<char_type> R>
     constexpr basic_cow_string& assign_range(R&& r) {
-        auto rg = std::forward<R>(r);
-        return assign(std::ranges::begin(rg), std::ranges::end(rg));
+        return assign(std::ranges::begin(r), std::ranges::end(r));
     }
 
     constexpr void clear() noexcept {
@@ -971,7 +996,8 @@ public:
 
     constexpr void reserve(const size_type new_cap) {
         if !consteval {
-            reserve_or_exclusive_shrink(std::ranges::max(new_cap, capacity()));
+            const size_type cap = std::ranges::max({ new_cap, size(), capacity() });
+            reserve_or_exclusive_shrink(cap);
         }
     }
 
@@ -1109,9 +1135,8 @@ public:
     basic_cow_string& append_range(R&& r)
         post (exclusive())
     {
-        auto rg = std::forward<R>(r);
         // TODO: add approximately_sized_range branch when supported
-        return append(std::ranges::begin(rg), std::ranges::end(rg));
+        return append(std::ranges::begin(r), std::ranges::end(r));
     }
 
     basic_cow_string& operator+=(string_view_type sv)
@@ -1136,7 +1161,7 @@ public:
     basic_cow_string& insert(size_type index, size_type count, char_type ch)
         post (exclusive())
     {
-        check_index(index);
+        check_pos(index);
         const size_type old_size = size();
         resize_and_overwrite(old_size + count,
             [index, count, ch, old_size](char_type* p, size_type new_size) noexcept {
@@ -1156,13 +1181,13 @@ public:
     basic_cow_string& insert(size_type index, string_view_type str)
         post (exclusive())
     {
-        check_index(index);
+        check_pos(index);
         const size_type old_size = size();
         const size_type add_size = str.size();
         resize_and_overwrite(old_size + add_size,
             [index, add_size, str, old_size](char_type* p, size_type new_size) noexcept {
             std::ranges::copy_backward(p + index, p + old_size, p + new_size);
-            std::ranges::copy_n(str.data(), add_size, p + index, p + new_size);
+            std::ranges::copy_n(str.data(), add_size, p + index);
             return new_size;
         });
         return *this;
@@ -1179,7 +1204,7 @@ public:
     basic_cow_string& insert(size_type index, Iter&& iter, Sent&& sent)
         post (exclusive())
     {
-        check_index(index);
+        check_pos(index);
         const size_type old_size = size();
         auto i = std::forward<Iter>(iter);
         auto s = std::forward<Sent>(sent);
@@ -1252,14 +1277,13 @@ public:
         pre (cbegin() <= pos && pos <= cend())
         post (exclusive())
     {
-        auto rg = std::forward<R>(r);
-        return insert(pos, std::ranges::begin(rg), std::ranges::end(rg));
+        return insert(pos, std::ranges::begin(r), std::ranges::end(r));
     }
 
     basic_cow_string& erase(size_type index = 0, size_type count = npos)
         post (exclusive())
     {
-        check_index(index);
+        check_pos(index);
         const size_type old_size = size();
         if (old_size - index <= count) {
             resize(index);
@@ -1293,7 +1317,7 @@ public:
     basic_cow_string& replace(size_type pos, size_type count, string_view_type str)
         post (exclusive())
     {
-        check_index(pos);
+        check_pos(pos);
         const size_type old_size = size();
         if (old_size - pos <= count) {
             resize(pos);
@@ -1343,7 +1367,7 @@ public:
                               size_type count2, char_type ch)
         post (exclusive())
     {
-        check_index(pos);
+        check_pos(pos);
         const size_type old_size = size();
         if (old_size - pos <= count) {
             resize(pos);
@@ -1382,10 +1406,9 @@ public:
                               Iter&& iter, Sent&& sent)
         post (exclusive())
     {
-        check_index(pos);
+        check_pos(pos);
         const size_type old_size = size();
         auto i = std::forward<Iter>(iter);
-        [[maybe_unused]]
         auto s = std::forward<Sent>(sent);
         if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
             // push_back fallback
@@ -1455,8 +1478,7 @@ public:
     basic_cow_string& replace_with_range(size_type pos, size_type count, R&& r)
         post (exclusive())
     {
-        auto rg = std::forward<R>(r);
-        return replace(pos, count, std::ranges::begin(rg), std::ranges::end(rg));
+        return replace(pos, count, std::ranges::begin(r), std::ranges::end(r));
     }
 
     template<details::container_compatible_range<char_type> R>
@@ -1464,8 +1486,7 @@ public:
         pre (cbegin() <= first && first <= last && last <= cend())
         post (exclusive())
     {
-        auto rg = std::forward<R>(r);
-        return replace(first, last, std::ranges::begin(rg), std::ranges::end(rg));
+        return replace(first, last, std::ranges::begin(r), std::ranges::end(r));
     }
 
 private:

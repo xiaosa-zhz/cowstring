@@ -635,7 +635,7 @@ public:
         return false;
     }
 
-    static consteval size_type max_size() noexcept { return details::cow_max_size<size_type>; }
+    static constexpr size_type max_size() noexcept { return details::cow_max_size<size_type>; }
     constexpr size_type size() const noexcept { return storage.size(); }
     constexpr size_type capacity() const noexcept { return storage.capacity(); }
     constexpr size_type length() const noexcept { return size(); }
@@ -1165,7 +1165,9 @@ public:
         const size_type old_size = size();
         resize_and_overwrite(old_size + count,
             [index, count, ch, old_size](char_type* p, size_type new_size) noexcept {
-            std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+            if (count != 0) {
+                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+            }
             std::ranges::fill_n(p + index, count, ch);
             return new_size;
         });
@@ -1186,7 +1188,9 @@ public:
         const size_type add_size = str.size();
         resize_and_overwrite(old_size + add_size,
             [index, add_size, str, old_size](char_type* p, size_type new_size) noexcept {
-            std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+            if (add_size != 0) {
+                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+            }
             std::ranges::copy_n(str.data(), add_size, p + index);
             return new_size;
         });
@@ -1224,7 +1228,9 @@ public:
             const size_type add_size = std::ranges::distance(i, s);
             resize_and_overwrite(old_size + add_size,
                 [index, add_size, old_size, &i](char_type* p, size_type new_size) noexcept {
-                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+                if (add_size != 0) {
+                    std::ranges::copy_backward(p + index, p + old_size, p + new_size);
+                }
                 std::ranges::copy_n(i, add_size, p + index);
                 return new_size;
             });
@@ -1289,8 +1295,10 @@ public:
             resize(index);
             return *this;
         }
-        char_type* const data = exclusive_data();
-        std::ranges::copy(data + index + count, data + old_size, data + index);
+        if (count != 0) {
+            char_type* const data = exclusive_data();
+            std::ranges::copy(data + index + count, data + old_size, data + index);
+        }
         resize(old_size - count);
         return *this;
     }
@@ -1334,7 +1342,9 @@ public:
         } else {
             char_type* const data = exclusive_data();
             std::ranges::copy_n(str.data(), add_size, data + pos);
-            std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+            if (add_size != rcount) {
+                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+            }
             resize(new_size);
         }
         return *this;
@@ -1384,7 +1394,9 @@ public:
         } else {
             char_type* const data = exclusive_data();
             std::ranges::fill_n(data + pos, add_size, ch);
-            std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+            if (add_size != rcount) {
+                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+            }
             resize(new_size);
         }
         return *this;
@@ -1440,7 +1452,9 @@ public:
             } else {
                 char_type* const data = exclusive_data();
                 std::ranges::move(i, s, data + pos);
-                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+                if (add_size != rcount) {
+                    std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+                }
                 resize(new_size);
             }
         }

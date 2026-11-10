@@ -426,10 +426,14 @@ private:
         }
     }
 
-    constexpr void deallocate_if_needed() noexcept {
+    constexpr void deallocate_if_needed() noexcept
+        post (!status().allocated)
+    {
         const auto s = status();
-        if (s.allocated && (!s.shared || ref_count().fetch_sub(1, std::memory_order_acq_rel) == 1)) {
-            details::deallocate(get_allocator(), { storage.dyn.data, storage.dyn.capacity });
+        if (s.allocated) {
+            if (!s.shared || ref_count().fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                details::deallocate(get_allocator(), { storage.dyn.data, storage.dyn.capacity });
+            }
             std::start_lifetime(storage.sso);
             storage.sso = {};
         }
@@ -494,6 +498,14 @@ private:
         if (index > size()) {
             throw std::out_of_range("basic_cow_string: out of range");
         }
+    }
+
+    // Modification in-place only requires source range is valid,
+    // so that it may have self-reference.
+    bool is_my_pointer(const char_type* ptr) const noexcept {
+        static constexpr std::less_equal<void> le = {}; 
+        const auto v = view();
+        return le(v.data(), ptr) && le(ptr, v.data() + v.size());
     }
 
 public:
@@ -974,7 +986,9 @@ public:
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
     constexpr basic_cow_string& assign(Iter&& iter, Sent&& sent) {
         if consteval {
-            write_static_string(std::forward<Iter>(iter), std::forward<Sent>(sent));
+            write_static_string(
+                std::ranges::subrange(std::forward<Iter>(iter), std::forward<Sent>(sent))
+            );
         } else {
             clear();
             append(std::forward<Iter>(iter), std::forward<Sent>(sent));
@@ -1393,8 +1407,7 @@ public:
         return *this;
     }
 
-    basic_cow_string& replace(const_iterator first, const_iterator last,
-        const string_view_type str)
+    basic_cow_string& replace(const_iterator first, const_iterator last, string_view_type str)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1402,15 +1415,15 @@ public:
         return replace(index, count, str);
     }
 
-    basic_cow_string& replace(const size_type pos, const size_type count,
-        const char_type* cstr, const size_type count2)
+    basic_cow_string& replace(size_type pos, size_type count,
+                              const char_type* cstr, size_type count2)
         post (exclusive())
     {
         return replace(pos, count, string_view_type(cstr, count2));
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last,
-        const char_type* cstr, size_type count2)
+                              const char_type* cstr, size_type count2)
         post (exclusive())
     {
         return replace(first, last, string_view_type(cstr, count2));

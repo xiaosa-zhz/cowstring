@@ -208,6 +208,10 @@ template<typename R, typename CharT>
 concept container_compatible_range = std::ranges::input_range<R>
     && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
 
+template<typename Iter, typename Sent>
+concept may_fast_route = std::contiguous_iterator<std::decay_t<Iter>>
+    && std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>;
+
 template<typename CharT>
 class literal_helper
 {
@@ -503,19 +507,12 @@ private:
 
     // Modification in-place only requires source range is valid,
     // so that it may have self-reference.
-    template<typename P>
-    bool is_my_pointer(const P& p) const noexcept {
+    template<std::contiguous_iterator I>
+    bool is_my_pointer(const I& i) const noexcept {
         static constexpr std::less_equal<void> le = {};
-        static constexpr bool maybe_my_pointer = 
-            requires { { std::to_address(p) } -> std::same_as<pointer>; } ||
-            requires { { std::to_address(p) } -> std::same_as<const_pointer>; };
-        if constexpr (maybe_my_pointer) {
-            const auto ptr = std::to_address(p);
-            const auto v = view();
-            return le(v.data(), ptr) && le(ptr, v.data() + v.size());
-        } else {
-            return false;
-        }
+        const auto ptr = std::to_address(i);
+        const auto v = view();
+        return le(v.data(), ptr) && le(ptr, v.data() + v.size());
     }
 
 public:
@@ -987,30 +984,22 @@ public:
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
     constexpr basic_cow_string& assign(Iter&& iter, Sent&& sent) {
-        std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
         if consteval {
+            std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
             write_static_string(std::move(r));
+            return *this;
         } else {
-            if (std::ranges::empty(r)) {
-                clear();
-            } else if (is_my_pointer(iter)) {
-                basic_cow_string(std::move(r), get_allocator()).swap(*this);
-            } else {
-                clear();
-                append_range(std::move(r));
-            }
+            return replace(0, npos, std::forward<Iter>(iter), std::forward<Sent>(sent));
         }
-        return *this;
     }
 
     constexpr basic_cow_string& assign(size_type count, char_type ch) {
         if consteval {
             write_static_string(std::views::repeat(ch, count));
+            return *this;
         } else {
-            clear();
-            append(count, ch);
+            return replace(0, npos, count, ch);
         }
-        return *this;
     }
 
     constexpr basic_cow_string& assign(const char_type* s, size_type count) {
@@ -1160,20 +1149,7 @@ public:
     basic_cow_string& append(Iter&& iter, Sent&& sent)
         post (exclusive())
     {
-        const size_type old_size = size();
-        if (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>> || is_my_pointer(iter)) {
-            string_type cp(std::forward<Iter>(iter), std::forward<Sent>(sent), get_allocator());
-            return append(cp);
-        }
-        auto i = std::forward<Iter>(iter);
-        auto s = std::forward<Sent>(sent);
-        const size_type add_size = std::ranges::distance(i, s);
-        resize_and_overwrite(old_size + add_size,
-            [old_size, add_size, &i](char_type* p, size_type count) noexcept {
-            std::ranges::copy_n(i, add_size, p + old_size);
-            return count;
-        });
-        return *this;
+        return replace(size(), npos, std::forward<Iter>(iter), std::forward<Sent>(sent));
     }
 
     basic_cow_string& append(std::initializer_list<char_type> il)
@@ -1212,17 +1188,7 @@ public:
     basic_cow_string& insert(size_type index, size_type count, char_type ch)
         post (exclusive())
     {
-        check_pos(index);
-        const size_type old_size = size();
-        resize_and_overwrite(old_size + count,
-            [index, count, ch, old_size](char_type* p, size_type new_size) noexcept {
-            if (count != 0) {
-                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
-            }
-            std::ranges::fill_n(p + index, count, ch);
-            return new_size;
-        });
-        return *this;
+        return replace(index, 0, count, ch);
     }
 
     basic_cow_string& insert(size_type index, char_type ch)
@@ -1248,24 +1214,7 @@ public:
     basic_cow_string& insert(size_type index, Iter&& iter, Sent&& sent)
         post (exclusive())
     {
-        check_pos(index);
-        if (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>> || is_my_pointer(iter)) {
-            string_type cp(std::forward<Iter>(iter), std::forward<Sent>(sent), get_allocator());
-            return insert(index, cp);
-        }
-        const size_type old_size = size();
-        auto i = std::forward<Iter>(iter);
-        auto s = std::forward<Sent>(sent);
-        const size_type add_size = std::ranges::distance(i, s);
-        resize_and_overwrite(old_size + add_size,
-            [index, add_size, old_size, &i](char_type* p, size_type new_size) noexcept {
-            if (add_size != 0) {
-                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
-            }
-            std::ranges::copy_n(i, add_size, p + index);
-            return new_size;
-        });
-        return *this;
+        return replace(index, 0, std::forward<Iter>(iter), std::forward<Sent>(sent));
     }
 
     basic_cow_string& insert(size_type index, std::initializer_list<char_type> il)
@@ -1319,19 +1268,7 @@ public:
     basic_cow_string& erase(size_type index = 0, size_type count = npos)
         post (exclusive())
     {
-        check_pos(index);
-        if (count == 0) {
-            return *this;
-        }
-        const size_type old_size = size();
-        if (old_size - index <= count) {
-            resize(index);
-            return *this;
-        }
-        char_type* const data = exclusive_data();
-        std::ranges::copy(data + index + count, data + old_size, data + index);
-        resize(old_size - count);
-        return *this;
+        return replace(index, count, 0, char_type());
     }
 
     iterator erase(const_iterator pos)
@@ -1385,15 +1322,17 @@ public:
         post (exclusive())
     {
         check_pos(pos);
-        const size_type old_size = size();
-        if (old_size - pos <= count) {
-            resize(pos);
-            return append(count2, ch);
+        if (count == 0 && count2 == 0) {
+            return *this;
         }
+        const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
         const size_type add_size = count2;
         const size_type new_size = old_size - rcount + add_size;
-        if (new_size > old_size) {
+        if (new_size == old_size) {
+            char_type* const data = exclusive_data();
+            std::ranges::fill_n(data + pos, add_size, ch);
+        } else if (new_size > old_size) {
             resize(new_size);
             char_type* const data = storage.data();
             std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
@@ -1425,34 +1364,36 @@ public:
         post (exclusive())
     {
         check_pos(pos);
-        if (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>> || is_my_pointer(iter)) {
-            string_type cp(std::forward<Iter>(iter), std::forward<Sent>(sent), get_allocator());
-            return replace(pos, count, cp);
-        }
-        const size_type old_size = size();
-        auto i = std::forward<Iter>(iter);
-        auto s = std::forward<Sent>(sent);
-        if (old_size - pos <= count) {
-            resize(pos);
-            return append(std::forward<Iter>(i), std::forward<Sent>(s));
-        }
-        const size_type rcount = std::ranges::min(count, old_size - pos);
-        const size_type add_size = std::ranges::distance(i, s);
-        const size_type new_size = old_size - rcount + add_size;
-        if (new_size > old_size) {
-            resize(new_size);
-            char_type* const data = storage.data();
-            std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
-            std::ranges::move(i, s, data + pos);
-        } else {
-            char_type* const data = exclusive_data();
-            std::ranges::move(i, s, data + pos);
-            if (add_size != rcount) {
-                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+        if constexpr (details::may_fast_route<Iter, Sent>) {
+            if (!is_my_pointer(iter)) {
+                const size_type old_size = size();
+                auto i = std::forward<Iter>(iter);
+                auto s = std::forward<Sent>(sent);
+                const size_type rcount = std::ranges::min(count, old_size - pos);
+                const size_type add_size = std::ranges::distance(i, s);
+                const size_type new_size = old_size - rcount + add_size;
+                if (new_size == old_size) {
+                    char_type* const data = exclusive_data();
+                    std::ranges::copy(i, s, data + pos);
+                } else if (new_size > old_size) {
+                    resize(new_size);
+                    char_type* const data = storage.data();
+                    std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+                    std::ranges::copy(i, s, data + pos);
+                } else {
+                    char_type* const data = exclusive_data();
+                    std::ranges::move(i, s, data + pos);
+                    if (add_size != rcount) {
+                        std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+                    }
+                    resize(new_size);
+                }
+                return *this;
             }
-            resize(new_size);
         }
-        return *this;
+        std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
+        string_type cp(std::from_range, std::move(r), get_allocator());
+        return replace(pos, count, cp);
     }
 
     template<typename Iter, typename Sent>

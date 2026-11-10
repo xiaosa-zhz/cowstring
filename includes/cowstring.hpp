@@ -232,6 +232,43 @@ private:
     std::size_t length;
 };
 
+template<typename CharT, bool IsConst>
+class string_iterator
+{
+public:
+    using iterator_concept = std::contiguous_iterator_tag;
+    using value_type = CharT;
+    using difference_type = std::ptrdiff_t;
+    using pointer = std::conditional_t<IsConst, const CharT*, CharT*>;
+    using reference = std::conditional_t<IsConst, const CharT&, CharT&>;
+
+    constexpr string_iterator() = default;
+    constexpr string_iterator(const string_iterator&) = default;
+    constexpr string_iterator& operator=(const string_iterator&) = default;
+
+    explicit constexpr string_iterator(pointer ptr) noexcept : cur(ptr) {}
+
+    constexpr reference operator*() const noexcept pre (cur != nullptr) { return *cur; }
+    constexpr string_iterator& operator++() noexcept pre (cur != nullptr) { ++cur; return *this; }
+    constexpr string_iterator operator++(int) noexcept pre (cur != nullptr) { auto tmp = *this; ++cur; return tmp; }
+    constexpr string_iterator& operator--() noexcept pre (cur != nullptr) { --cur; return *this; }
+    constexpr string_iterator operator--(int) noexcept pre (cur != nullptr) { auto tmp = *this; --cur; return tmp; }
+    constexpr string_iterator& operator+=(difference_type n) noexcept pre (cur != nullptr) { cur += n; return *this; }
+    constexpr string_iterator& operator-=(difference_type n) noexcept pre (cur != nullptr) { cur -= n; return *this; }
+    constexpr string_iterator operator+(difference_type n) const noexcept pre (cur != nullptr) { return auto(*this) += n; }
+    friend constexpr string_iterator operator+(difference_type n, string_iterator it) noexcept pre (it.cur != nullptr) { return it += n; }
+    constexpr string_iterator operator-(difference_type n) const noexcept pre (cur != nullptr) { return auto(*this) -= n; }
+    constexpr difference_type operator-(string_iterator other) const noexcept pre (cur != nullptr && other.cur != nullptr) { return cur - other.cur; }
+    constexpr reference operator[](difference_type n) const noexcept pre (cur != nullptr) { return *(cur + n); }
+    constexpr pointer operator->() const noexcept pre (cur != nullptr) { return cur; }
+
+    friend constexpr bool operator==(string_iterator lhs, string_iterator rhs) = default;
+    friend constexpr auto operator<=>(string_iterator lhs, string_iterator rhs) = default;
+
+private:
+    pointer cur = nullptr;
+};
+
 } // namespace cow::details
 
 template<typename CharT, typename Allocator = std::allocator<CharT>>
@@ -248,8 +285,8 @@ public:
     using reference = value_type&;
     using const_pointer = allocator_traits_type::const_pointer;
     using pointer = allocator_traits_type::pointer;
-    using const_iterator = const value_type*;
-    using iterator = value_type*;
+    using const_iterator = details::string_iterator<value_type, true>;
+    using iterator = details::string_iterator<value_type, false>;
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
     using reverse_iterator = std::reverse_iterator<iterator>;
 
@@ -266,6 +303,8 @@ private:
         && std::is_same_v<std::remove_pointer_t<pointer>, char_type>);
     using storage_type = details::storage<char_type, size_type>;
     static_assert(sizeof(storage_type) == sizeof(storage_type::dyn));
+    static_assert(std::contiguous_iterator<iterator>);
+    static_assert(std::contiguous_iterator<const_iterator>);
     static constexpr size_type growing_factor = 2;
 
     // Allocator strategy of cow_string
@@ -650,8 +689,8 @@ public:
     constexpr basic_cow_string clone() const { return { view(), allocator_copy() }; }
     constexpr const_pointer data() const noexcept { return storage.data(); }
     constexpr const_pointer c_str() const noexcept { return storage.data(); }
-    constexpr const_iterator begin() const noexcept { return storage.data(); }
-    constexpr const_iterator end() const noexcept { return storage.data() + size(); }
+    constexpr const_iterator begin() const noexcept { return const_iterator(storage.data()); }
+    constexpr const_iterator end() const noexcept { return const_iterator(storage.data() + size()); }
     constexpr const_iterator cbegin() const noexcept { return begin(); }
     constexpr const_iterator cend() const noexcept { return end(); }
     constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
@@ -1006,8 +1045,8 @@ public:
     }
 
     pointer data() post (exclusive()) { return exclusive_data(); }
-    iterator begin() post (exclusive()) { return data(); }
-    iterator end() post (exclusive()) { return data() + size(); }
+    iterator begin() post (exclusive()) { return iterator(data()); }
+    iterator end() post (exclusive()) { return iterator(data() + size()); }
     reverse_iterator rbegin() post (exclusive()) { return reverse_iterator(end()); }
     reverse_iterator rend() post (exclusive()) { return reverse_iterator(begin()); }
     reference front() pre (!empty()) post (exclusive()) { return exclusive_data()[0]; }

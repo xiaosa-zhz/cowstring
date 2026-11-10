@@ -208,8 +208,14 @@ template<typename R, typename CharT>
 concept container_compatible_range = std::ranges::input_range<R>
     && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
 
+template<typename Iter>
+concept can_to_address = std::contiguous_iterator<Iter> || requires(const Iter& it) {
+    requires requires { std::pointer_traits<Iter>::to_address(it); }
+          || requires { it.operator->(); };
+};
+
 template<typename Iter, typename Sent>
-concept may_fast_route = std::contiguous_iterator<std::decay_t<Iter>>
+concept may_fast_route = can_to_address<std::decay_t<Iter>>
     && std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>;
 
 template<typename CharT>
@@ -249,8 +255,11 @@ public:
     constexpr string_iterator() = default;
     constexpr string_iterator(const string_iterator&) = default;
     constexpr string_iterator& operator=(const string_iterator&) = default;
-
     explicit constexpr string_iterator(pointer ptr) noexcept : cur(ptr) {}
+
+    operator string_iterator<CharT, true>() noexcept requires(!IsConst) {
+        return string_iterator<CharT, true>(cur);
+    }
 
     constexpr reference operator*() const noexcept pre (cur != nullptr) { return *cur; }
     constexpr string_iterator& operator++() noexcept pre (cur != nullptr) { ++cur; return *this; }
@@ -507,10 +516,10 @@ private:
 
     // Modification in-place only requires source range is valid,
     // so that it may have self-reference.
-    template<std::contiguous_iterator I>
-    bool is_my_pointer(const I& i) const noexcept {
+    template<details::can_to_address It>
+    bool is_my_pointer(const It& it) const noexcept {
         static constexpr std::less_equal<void> le = {};
-        const auto ptr = std::to_address(i);
+        const auto ptr = std::to_address(it);
         const auto v = view();
         return le(v.data(), ptr) && le(ptr, v.data() + v.size());
     }
@@ -1262,7 +1271,10 @@ public:
         pre (is_my_pointer(pos))
         post (exclusive())
     {
-        return insert(pos, std::ranges::begin(r), std::ranges::end(r));
+        // Transfer iterator to index eagerly to avoid issues if r is the current object.
+        const size_type index = pos - cbegin();
+        insert(index, std::ranges::begin(r), std::ranges::end(r));
+        return begin() + index;
     }
 
     basic_cow_string& erase(size_type index = 0, size_type count = npos)
@@ -1273,6 +1285,7 @@ public:
 
     iterator erase(const_iterator pos)
         pre (is_my_pointer(pos))
+        pre (pos != cend())
         post (exclusive())
     {
         const size_type index = pos - cbegin();
@@ -1281,7 +1294,8 @@ public:
     }
 
     iterator erase(const_iterator first, const_iterator last)
-        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
+        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1297,7 +1311,8 @@ public:
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last, string_view_type str)
-        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
+        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1322,9 +1337,6 @@ public:
         post (exclusive())
     {
         check_pos(pos);
-        if (count == 0 && count2 == 0) {
-            return *this;
-        }
         const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
         const size_type add_size = count2;
@@ -1350,7 +1362,8 @@ public:
     
     basic_cow_string& replace(const_iterator first, const_iterator last,
                               size_type count2, char_type ch)
-        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
+        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1399,7 +1412,8 @@ public:
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
     basic_cow_string& replace(const_iterator first, const_iterator last, Iter&& iter, Sent&& sent)
-        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
+        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1416,7 +1430,8 @@ public:
 
     basic_cow_string& replace(const_iterator first, const_iterator last,
                               std::initializer_list<char_type> il)
-        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
+        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (first <= last)
         post (exclusive())
     {
         return replace(first, last, il.begin(), il.end());
@@ -1431,10 +1446,14 @@ public:
 
     template<details::container_compatible_range<char_type> R>
     basic_cow_string& replace_with_range(const_iterator first, const_iterator last, R&& r)
-        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
+        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (first <= last)
         post (exclusive())
     {
-        return replace(first, last, std::ranges::begin(r), std::ranges::end(r));
+        // Transfer iterators to index eagerly to avoid issues if r is the current object.
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, std::ranges::begin(r), std::ranges::end(r));
     }
 
 private:
@@ -1449,13 +1468,13 @@ using cow_u32string = basic_cow_string<char32_t>;
 
 namespace literals::inline cow_string_literals {
 
-    consteval cow_string operator""_cows(const char* str, std::size_t) { return str; }
-    consteval cow_wstring operator""_cows(const wchar_t* str, std::size_t) { return str; }
-    consteval cow_u8string operator""_cows(const char8_t* str, std::size_t) { return str; }
-    consteval cow_u16string operator""_cows(const char16_t* str, std::size_t) { return str; }
-    consteval cow_u32string operator""_cows(const char32_t* str, std::size_t) { return str; }
+consteval cow_string operator""_cows(const char* str, std::size_t) { return str; }
+consteval cow_wstring operator""_cows(const wchar_t* str, std::size_t) { return str; }
+consteval cow_u8string operator""_cows(const char8_t* str, std::size_t) { return str; }
+consteval cow_u16string operator""_cows(const char16_t* str, std::size_t) { return str; }
+consteval cow_u32string operator""_cows(const char32_t* str, std::size_t) { return str; }
 
-} // namespace literals::cow_string_literals
+} // namespace cow::literals::cow_string_literals
 
 } // namespace cow
 

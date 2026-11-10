@@ -290,8 +290,8 @@ public:
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
     using reverse_iterator = std::reverse_iterator<iterator>;
 
-    using string_view_type = std::basic_string_view<value_type>;
-    using string_type = std::basic_string<value_type>;
+    using string_view_type = std::basic_string_view<char_type>;
+    using string_type = std::basic_string<char_type, std::char_traits<char_type>, allocator_type>;
 
     static constexpr size_type npos = static_cast<size_type>(-1);
 
@@ -334,7 +334,8 @@ private:
         pre (!status().allocated)
         post (!status().allocated)
     {
-        string_type test(std::from_range, std::forward<R>(r));
+        // Do not touch customized allocator here
+        std::basic_string<char_type> test(std::from_range, std::forward<R>(r));
         if (test.size() > storage.sso.capacity) {
             std::start_lifetime(storage.sta);
             storage.sta = { .data = std::define_static_string(test), .size = test.size() };
@@ -502,10 +503,19 @@ private:
 
     // Modification in-place only requires source range is valid,
     // so that it may have self-reference.
-    bool is_my_pointer(const char_type* ptr) const noexcept {
-        static constexpr std::less_equal<void> le = {}; 
-        const auto v = view();
-        return le(v.data(), ptr) && le(ptr, v.data() + v.size());
+    template<typename P>
+    bool is_my_pointer(const P& p) const noexcept {
+        static constexpr std::less_equal<void> le = {};
+        static constexpr bool maybe_my_pointer = 
+            requires { { std::to_address(p) } -> std::same_as<pointer>; } ||
+            requires { { std::to_address(p) } -> std::same_as<const_pointer>; };
+        if constexpr (maybe_my_pointer) {
+            const auto ptr = std::to_address(p);
+            const auto v = view();
+            return le(v.data(), ptr) && le(ptr, v.data() + v.size());
+        } else {
+            return false;
+        }
     }
 
 public:
@@ -696,7 +706,7 @@ public:
     constexpr size_type length() const noexcept { return size(); }
     constexpr bool empty() const noexcept { return size() == 0; }
     constexpr string_view_type view() const noexcept { return storage.view(); }
-    constexpr string_type string() const { return string_type(view()); }
+    constexpr string_type string() const { return string_type(view(), allocator_copy()); }
     constexpr operator string_view_type() const noexcept { return view(); }
     constexpr basic_cow_string clone() const { return { view(), allocator_copy() }; }
     constexpr const_pointer data() const noexcept { return storage.data(); }
@@ -800,9 +810,9 @@ public:
 
     constexpr basic_cow_string substr(size_type pos = 0, size_type count = npos) const {
         if (pos == 0 && count >= size()) {
-            return auto(*this);
+            return *this;
         } else {
-            return basic_cow_string(view(), pos, count, allocator_copy());
+            return { subview(pos, count), allocator_copy() };
         }
     }
 
@@ -846,6 +856,9 @@ public:
     void ensure_exclusive() { (void) exclusive_data(); }
 
     constexpr void swap(basic_cow_string& other) noexcept(always_equal_alloc || POCS) {
+        if (this == &other) {
+            return;
+        }
         if constexpr (always_equal_alloc) {
             std::ranges::swap(this->storage, other.storage);
         } else if constexpr (POCS) {
@@ -946,18 +959,7 @@ public:
         requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
     constexpr basic_cow_string& assign(const StringViewLike& sv) {
         const string_view_type view = sv;
-        if consteval {
-            write_static_string(view);
-        } else {
-            const auto* const data = view.data();
-            const size_type size = view.size();
-            resize_and_overwrite(view.size(), 
-                [data, size](char_type* p, size_type count) constexpr noexcept {
-                std::ranges::copy_n(data, size, p);
-                return count;
-            });
-        }
-        return *this;
+        return assign(view.begin(), view.end());
     }
 
     template<std::convertible_to<string_view_type> StringViewLike>
@@ -985,13 +987,18 @@ public:
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
     constexpr basic_cow_string& assign(Iter&& iter, Sent&& sent) {
+        std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
         if consteval {
-            write_static_string(
-                std::ranges::subrange(std::forward<Iter>(iter), std::forward<Sent>(sent))
-            );
+            write_static_string(std::move(r));
         } else {
-            clear();
-            append(std::forward<Iter>(iter), std::forward<Sent>(sent));
+            if (std::ranges::empty(r)) {
+                clear();
+            } else if (is_my_pointer(iter)) {
+                basic_cow_string(std::move(r), get_allocator()).swap(*this);
+            } else {
+                clear();
+                append_range(std::move(r));
+            }
         }
         return *this;
     }
@@ -1001,7 +1008,7 @@ public:
             write_static_string(std::views::repeat(ch, count));
         } else {
             clear();
-            append_range(std::views::repeat(ch, count));
+            append(count, ch);
         }
         return *this;
     }
@@ -1133,21 +1140,13 @@ public:
     basic_cow_string& append(string_view_type sv, size_type pos, size_type count = npos)
         post (exclusive())
     {
-        const string_view_type view = string_view_type(sv).substr(pos, count);
-        const size_type old_size = size();
-        const size_type add_size = view.size();
-        resize_and_overwrite(old_size + add_size,
-            [old_size, add_size, view](char_type* p, size_type count) noexcept {
-            std::ranges::copy_n(view.data(), add_size, p + old_size);
-            return count;
-        });
-        return *this;
+        return append(sv.substr(pos, count));
     }
 
     basic_cow_string& append(string_view_type sv)
         post (exclusive())
     {
-        return append(sv, 0, npos);
+        return append(sv.begin(), sv.end());
     }
 
     basic_cow_string& append(const char_type* s, size_type count)
@@ -1162,23 +1161,18 @@ public:
         post (exclusive())
     {
         const size_type old_size = size();
+        if (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>> || is_my_pointer(iter)) {
+            string_type cp(std::forward<Iter>(iter), std::forward<Sent>(sent), get_allocator());
+            return append(cp);
+        }
         auto i = std::forward<Iter>(iter);
         auto s = std::forward<Sent>(sent);
-        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
-            // push_back fallback
-            basic_cow_string temp(view(), get_allocator());
-            for (; i != s; ++i) {
-                temp.push_back(*i);
-            }
-            *this = std::move(temp);
-        } else {
-            const size_type add_size = std::ranges::distance(i, s);
-            resize_and_overwrite(old_size + add_size,
-                [old_size, add_size, &i](char_type* p, size_type count) noexcept {
-                std::ranges::copy_n(i, add_size, p + old_size);
-                return count;
-            });
-        }
+        const size_type add_size = std::ranges::distance(i, s);
+        resize_and_overwrite(old_size + add_size,
+            [old_size, add_size, &i](char_type* p, size_type count) noexcept {
+            std::ranges::copy_n(i, add_size, p + old_size);
+            return count;
+        });
         return *this;
     }
 
@@ -1240,18 +1234,7 @@ public:
     basic_cow_string& insert(size_type index, string_view_type str)
         post (exclusive())
     {
-        check_pos(index);
-        const size_type old_size = size();
-        const size_type add_size = str.size();
-        resize_and_overwrite(old_size + add_size,
-            [index, add_size, str, old_size](char_type* p, size_type new_size) noexcept {
-            if (add_size != 0) {
-                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
-            }
-            std::ranges::copy_n(str.data(), add_size, p + index);
-            return new_size;
-        });
-        return *this;
+        return insert(index, str.begin(), str.end());
     }
 
     basic_cow_string& insert(size_type index, const char_type* s, size_type count)
@@ -1266,32 +1249,22 @@ public:
         post (exclusive())
     {
         check_pos(index);
+        if (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>> || is_my_pointer(iter)) {
+            string_type cp(std::forward<Iter>(iter), std::forward<Sent>(sent), get_allocator());
+            return insert(index, cp);
+        }
         const size_type old_size = size();
         auto i = std::forward<Iter>(iter);
         auto s = std::forward<Sent>(sent);
-        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
-            // push_back fallback
-            basic_cow_string temp = substr(0, index);
-            try {
-                for (; i != s; ++i) {
-                    temp.push_back(*i);
-                }
-            } catch (...) {
-                throw;
+        const size_type add_size = std::ranges::distance(i, s);
+        resize_and_overwrite(old_size + add_size,
+            [index, add_size, old_size, &i](char_type* p, size_type new_size) noexcept {
+            if (add_size != 0) {
+                std::ranges::copy_backward(p + index, p + old_size, p + new_size);
             }
-            temp.append(subview(index, npos));
-            swap(temp);
-        } else {
-            const size_type add_size = std::ranges::distance(i, s);
-            resize_and_overwrite(old_size + add_size,
-                [index, add_size, old_size, &i](char_type* p, size_type new_size) noexcept {
-                if (add_size != 0) {
-                    std::ranges::copy_backward(p + index, p + old_size, p + new_size);
-                }
-                std::ranges::copy_n(i, add_size, p + index);
-                return new_size;
-            });
-        }
+            std::ranges::copy_n(i, add_size, p + index);
+            return new_size;
+        });
         return *this;
     }
 
@@ -1302,7 +1275,7 @@ public:
     }
 
     iterator insert(const_iterator pos, size_type count, char_type ch)
-        pre (cbegin() <= pos && pos <= cend())
+        pre (is_my_pointer(pos))
         post (exclusive())
     {
         const size_type index = pos - cbegin();
@@ -1311,7 +1284,7 @@ public:
     }
 
     iterator insert(const_iterator pos, char_type ch)
-        pre (cbegin() <= pos && pos <= cend())
+        pre (is_my_pointer(pos))
         post (exclusive())
     {
         return insert(pos, 1, ch);
@@ -1320,7 +1293,7 @@ public:
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
     iterator insert(const_iterator pos, Iter&& iter, Sent&& sent)
-        pre (cbegin() <= pos && pos <= cend())
+        pre (is_my_pointer(pos))
         post (exclusive())
     {
         const size_type index = pos - cbegin();
@@ -1329,7 +1302,7 @@ public:
     }
 
     iterator insert(const_iterator pos, std::initializer_list<char_type> il)
-        pre (cbegin() <= pos && pos <= cend())
+        pre (is_my_pointer(pos))
         post (exclusive())
     {
         return insert(pos, il.begin(), il.end());
@@ -1337,7 +1310,7 @@ public:
 
     template<details::container_compatible_range<char_type> R>
     iterator insert_range(const_iterator pos, R&& r)
-        pre (cbegin() <= pos && pos <= cend())
+        pre (is_my_pointer(pos))
         post (exclusive())
     {
         return insert(pos, std::ranges::begin(r), std::ranges::end(r));
@@ -1347,21 +1320,22 @@ public:
         post (exclusive())
     {
         check_pos(index);
+        if (count == 0) {
+            return *this;
+        }
         const size_type old_size = size();
         if (old_size - index <= count) {
             resize(index);
             return *this;
         }
-        if (count != 0) {
-            char_type* const data = exclusive_data();
-            std::ranges::copy(data + index + count, data + old_size, data + index);
-        }
+        char_type* const data = exclusive_data();
+        std::ranges::copy(data + index + count, data + old_size, data + index);
         resize(old_size - count);
         return *this;
     }
 
     iterator erase(const_iterator pos)
-        pre (cbegin() <= pos && pos < cend())
+        pre (is_my_pointer(pos))
         post (exclusive())
     {
         const size_type index = pos - cbegin();
@@ -1370,7 +1344,7 @@ public:
     }
 
     iterator erase(const_iterator first, const_iterator last)
-        pre (cbegin() <= first && first <= last && last <= cend())
+        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1382,32 +1356,11 @@ public:
     basic_cow_string& replace(size_type pos, size_type count, string_view_type str)
         post (exclusive())
     {
-        check_pos(pos);
-        const size_type old_size = size();
-        if (old_size - pos <= count) {
-            resize(pos);
-            return append(str);
-        }
-        const size_type rcount = std::ranges::min(count, old_size - pos);
-        const size_type add_size = str.size();
-        const size_type new_size = old_size - rcount + add_size;
-        if (new_size > old_size) {
-            resize(new_size);
-            char_type* const data = storage.data();
-            std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
-            std::ranges::copy_n(str.data(), add_size, data + pos);
-        } else {
-            char_type* const data = exclusive_data();
-            std::ranges::copy_n(str.data(), add_size, data + pos);
-            if (add_size != rcount) {
-                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
-            }
-            resize(new_size);
-        }
-        return *this;
+        return replace(pos, count, str.begin(), str.end());
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last, string_view_type str)
+        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1422,15 +1375,13 @@ public:
         return replace(pos, count, string_view_type(cstr, count2));
     }
 
-    basic_cow_string& replace(const_iterator first, const_iterator last,
-                              const char_type* cstr, size_type count2)
+    basic_cow_string& replace(const_iterator first, const_iterator last, const char_type* cstr, size_type count2)
         post (exclusive())
     {
         return replace(first, last, string_view_type(cstr, count2));
     }
 
-    basic_cow_string& replace(size_type pos, size_type count,
-                              size_type count2, char_type ch)
+    basic_cow_string& replace(size_type pos, size_type count, size_type count2, char_type ch)
         post (exclusive())
     {
         check_pos(pos);
@@ -1460,7 +1411,7 @@ public:
     
     basic_cow_string& replace(const_iterator first, const_iterator last,
                               size_type count2, char_type ch)
-        pre (cbegin() <= first && first <= last && last <= cend())
+        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1470,58 +1421,44 @@ public:
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    basic_cow_string& replace(size_type pos, size_type count,
-                              Iter&& iter, Sent&& sent)
+    basic_cow_string& replace(size_type pos, size_type count, Iter&& iter, Sent&& sent)
         post (exclusive())
     {
         check_pos(pos);
+        if (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>> || is_my_pointer(iter)) {
+            string_type cp(std::forward<Iter>(iter), std::forward<Sent>(sent), get_allocator());
+            return replace(pos, count, cp);
+        }
         const size_type old_size = size();
         auto i = std::forward<Iter>(iter);
         auto s = std::forward<Sent>(sent);
-        if constexpr (!std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
-            // push_back fallback
-            basic_cow_string temp = substr(0, pos);
-            try {
-                for (; i != s; ++i) {
-                    temp.push_back(*i);
-                }
-            } catch (...) {
-                throw;
-            }
-            if (old_size - pos > count) {
-                temp.append(subview(pos + count, npos));
-            }
-            swap(temp);
+        if (old_size - pos <= count) {
+            resize(pos);
+            return append(std::forward<Iter>(i), std::forward<Sent>(s));
+        }
+        const size_type rcount = std::ranges::min(count, old_size - pos);
+        const size_type add_size = std::ranges::distance(i, s);
+        const size_type new_size = old_size - rcount + add_size;
+        if (new_size > old_size) {
+            resize(new_size);
+            char_type* const data = storage.data();
+            std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+            std::ranges::move(i, s, data + pos);
         } else {
-            if (old_size - pos <= count) {
-                resize(pos);
-                return append(std::forward<Iter>(i), std::forward<Sent>(s));
+            char_type* const data = exclusive_data();
+            std::ranges::move(i, s, data + pos);
+            if (add_size != rcount) {
+                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
             }
-            const size_type rcount = std::ranges::min(count, old_size - pos);
-            const size_type add_size = std::ranges::distance(i, s);
-            const size_type new_size = old_size - rcount + add_size;
-            if (new_size > old_size) {
-                resize(new_size);
-                char_type* const data = storage.data();
-                std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
-                std::ranges::move(i, s, data + pos);
-            } else {
-                char_type* const data = exclusive_data();
-                std::ranges::move(i, s, data + pos);
-                if (add_size != rcount) {
-                    std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
-                }
-                resize(new_size);
-            }
+            resize(new_size);
         }
         return *this;
     }
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    basic_cow_string& replace(const_iterator first, const_iterator last,
-                              Iter&& iter, Sent&& sent)
-        pre (cbegin() <= first && first <= last && last <= cend())
+    basic_cow_string& replace(const_iterator first, const_iterator last, Iter&& iter, Sent&& sent)
+        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
@@ -1538,7 +1475,7 @@ public:
 
     basic_cow_string& replace(const_iterator first, const_iterator last,
                               std::initializer_list<char_type> il)
-        pre (cbegin() <= first && first <= last && last <= cend())
+        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
         post (exclusive())
     {
         return replace(first, last, il.begin(), il.end());
@@ -1553,7 +1490,7 @@ public:
 
     template<details::container_compatible_range<char_type> R>
     basic_cow_string& replace_with_range(const_iterator first, const_iterator last, R&& r)
-        pre (cbegin() <= first && first <= last && last <= cend())
+        pre (is_my_pointer(first) && is_my_pointer(last) && first <= last)
         post (exclusive())
     {
         return replace(first, last, std::ranges::begin(r), std::ranges::end(r));

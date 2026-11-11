@@ -540,6 +540,71 @@ private:
         return within;
     }
 
+    bool inplace_self_replace(size_type pos, size_type count,
+                              const char_type* const src,
+                              const size_type srclen) noexcept
+    {
+        if (!exclusive()) {
+            return false;
+        }
+        // Some non-owning users are aliasing us, but we can
+        // try to do modification in-place if possible.
+        // They are invalidated anyway.
+        const size_type old_size = size();
+        const size_type rcount = std::ranges::min(count, old_size - pos);
+        const size_type new_size = old_size - rcount + srclen;
+        const size_type cap = capacity();
+        if (new_size > cap) {
+            return false;
+        }
+        // Capacity is enough, so no reallocation happens and
+        // the source range stays valid during the operation.
+        char_type* const data = storage.data();
+        char_type* const old_end = data + old_size;
+        char_type* const new_end = data + new_size;
+        const char_type* const src_end = src + srclen;
+        char_type* const dst = data + pos;
+        char_type* const dst_end = dst + rcount;
+        char_type* const tail = new_end - (old_end - dst_end);
+        if (new_size == old_size) {
+            details::strmov(src, src_end, dst);
+            return true;
+        }
+        if (new_size < old_size) {
+            // Move the source and tail before shrinking.
+            // resize() writes a null terminator at the new end,
+            // which used to clobber data that was still needed
+            // by the tail move.
+            details::strmov(src, src_end, dst);
+            details::strmov(dst_end, old_end, tail);
+            resize(new_size);
+            return true;
+        }
+        // Growing
+        resize(new_size);
+        if (src <= dst) {
+            // Source lies before (or at) the destination,
+            // so moving the tail cannot clobber it.
+            details::strmov(dst_end, old_end, tail);
+            details::strmov(src, src_end, dst);
+            return true;
+        }
+        // Source starts right of the destination.
+        // The part before the old tail is copied in place,
+        // the rest is relocated with the tail and then
+        // copied from its new location.
+        const difference_type prefix = std::ranges::max(dst_end - src, 0z);
+        if (prefix != 0) {
+            details::strmov(src, dst_end, dst);
+        }
+        details::strmov(dst_end, old_end, tail);
+        const char_type* const moved =
+            (src < dst_end ? dst_end : src) + srclen - rcount;
+        details::strmov(moved, moved + (srclen - prefix),
+                        dst + prefix);
+        return true;
+    }
+
 public:
     constexpr explicit basic_cow_string(const allocator_type& alloc) noexcept
         : allocator_type(alloc)
@@ -1552,61 +1617,9 @@ public:
                 return *this;
             }
             if constexpr (std::contiguous_iterator<std::decay_t<Iter>>) {
-                if (exclusive()) {
-                    // Some non-owning users are aliasing us, but we can
-                    // try to do modification in-place if possible.
-                    // They are invalidated anyway.
-                    const size_type old_size = size();
-                    const size_type rcount = std::ranges::min(count, old_size - pos);
-                    const size_type new_size = old_size - rcount + add_size;
-                    const size_type cap = capacity();
-                    if (new_size <= cap) {
-                        // Capacity is enough, so no reallocation happens and
-                        // the source range stays valid during the operation.
-                        char_type* const data = storage.data();
-                        char_type* const old_end = data + old_size;
-                        char_type* const new_end = data + new_size;
-                        const char_type* const src = std::to_address(iter);
-                        const char_type* const src_end = src + add_size;
-                        char_type* const dst = data + pos;
-                        char_type* const dst_end = dst + rcount;
-                        char_type* const tail = new_end - (old_end - dst_end);
-                        if (new_size == old_size) {
-                            details::strmov(src, src_end, dst);
-                        } else if (new_size < old_size) {
-                            // Move the source and tail before shrinking.
-                            // resize() writes a null terminator at the new end,
-                            // which used to clobber data that was still needed
-                            // by the tail move.
-                            details::strmov(src, src_end, dst);
-                            details::strmov(dst_end, old_end, tail);
-                            resize(new_size);
-                        } else {
-                            // Growing
-                            resize(new_size);
-                            if (src <= dst) {
-                                // Source lies before (or at) the destination,
-                                // so moving the tail cannot clobber it.
-                                details::strmov(dst_end, old_end, tail);
-                                details::strmov(src, src_end, dst);
-                            } else {
-                                // Source starts right of the destination.
-                                // The part before the old tail is copied in place,
-                                // the rest is relocated with the tail and then
-                                // copied from its new location.
-                                const difference_type prefix = std::ranges::max(dst_end - src, 0z);
-                                if (prefix != 0) {
-                                    details::strmov(src, dst_end, dst);
-                                }
-                                details::strmov(dst_end, old_end, tail);
-                                const char_type* const moved =
-                                    (src < dst_end ? dst_end : src) + add_size - rcount;
-                                details::strmov(moved, moved + (add_size - prefix),
-                                                dst + prefix);
-                            }
-                        }
-                        return *this;
-                    }
+                const char_type* const src = std::to_address(iter);
+                if (inplace_self_replace(pos, count, src, add_size)) {
+                    return *this;
                 }
             }
         }

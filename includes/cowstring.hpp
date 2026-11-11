@@ -234,8 +234,8 @@ public:
         }
     }
 
-    consteval const CharT* data() const noexcept { return str; }
-    consteval std::size_t size() const noexcept { return length; }
+    constexpr const CharT* data() const noexcept { return str; }
+    constexpr std::size_t size() const noexcept { return length; }
 
 private:
     const CharT* str;
@@ -587,7 +587,7 @@ public:
     {}
 
     template<typename COWString>
-        requires std::same_as<std::decay_t<COWString>, basic_cow_string>
+        requires std::same_as<std::remove_cvref_t<COWString>, basic_cow_string>
     constexpr basic_cow_string(COWString&& other, const allocator_type& alloc)
         noexcept(always_equal_alloc)
         : basic_cow_string(std::forward<COWString>(other), 0, npos, alloc)
@@ -688,13 +688,13 @@ public:
     }
 
     template<std::convertible_to<string_view_type> StringViewLike>
-        requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
+        requires (!std::convertible_to<const StringViewLike&, const char_type*>)
     explicit constexpr basic_cow_string(const StringViewLike& sv) 
         : basic_cow_string(string_view_type(sv), allocator_type())
     {}
 
     template<std::convertible_to<string_view_type> StringViewLike>
-        requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
+        requires (!std::convertible_to<const StringViewLike&, const char_type*>)
               && (!std::same_as<std::decay_t<StringViewLike>, basic_cow_string>)
     constexpr basic_cow_string(const StringViewLike& sv, const allocator_type& alloc)
         : basic_cow_string(alloc)
@@ -882,11 +882,68 @@ public:
     }
 
     constexpr bool operator==(const basic_cow_string& other) const noexcept { return view() == other.view(); }
-    constexpr bool operator==(string_view_type other) const noexcept { return view() == other; }
-    constexpr bool operator==(const char_type* other) const noexcept { return view() == string_view_type(other); }
     constexpr auto operator<=>(const basic_cow_string& other) const noexcept { return view() <=> other.view(); }
-    constexpr auto operator<=>(string_view_type other) const noexcept { return view() <=> other; }
-    constexpr auto operator<=>(const char_type* other) const noexcept { return view() <=> string_view_type(other); }
+
+    template<std::convertible_to<string_view_type> StringViewLike>
+        requires (!std::convertible_to<const StringViewLike&, const char_type*>)
+    constexpr bool operator==(const StringViewLike& other) const
+        noexcept(std::is_nothrow_convertible_v<const StringViewLike&, string_view_type>)
+    {
+        return view() == string_view_type(other);
+    }
+
+    template<std::convertible_to<string_view_type> StringViewLike>
+        requires (!std::convertible_to<const StringViewLike&, const char_type*>)
+    constexpr auto operator<=>(const StringViewLike& other) const
+        noexcept(std::is_nothrow_convertible_v<const StringViewLike&, string_view_type>)
+    {
+        return view() <=> string_view_type(other);
+    }
+
+    constexpr bool operator==(details::literal_helper<char_type> literal) const noexcept {
+        return view() == string_view_type(literal.data(), literal.size());
+    }
+
+    constexpr auto operator<=>(details::literal_helper<char_type> literal) const noexcept {
+        return view() <=> string_view_type(literal.data(), literal.size());
+    }
+
+    constexpr int compare(details::literal_helper<char_type> literal) const noexcept {
+        return view().compare(string_view_type(literal.data(), literal.size()));
+    }
+
+    constexpr int compare(size_type pos, size_type count,
+                          details::literal_helper<char_type> literal) const
+    {
+        return view().compare(pos, count, string_view_type(literal.data(), literal.size()));
+    }
+
+    template<std::convertible_to<string_view_type> StringViewLike>
+        requires (!std::convertible_to<const StringViewLike&, const char_type*>)
+    constexpr int compare(const StringViewLike& other) const
+        noexcept(std::is_nothrow_convertible_v<const StringViewLike&, string_view_type>)
+    {
+        return view().compare(string_view_type(other));
+    }
+
+    template<std::convertible_to<string_view_type> StringViewLike>
+    constexpr int compare(size_type pos, size_type count,
+                          const StringViewLike& other) const
+    {
+        return view().compare(pos, count, string_view_type(other));
+    }
+
+    constexpr int compare(size_type pos1, size_type count1, string_view_type v,
+                          size_type pos2, size_type count2) const
+    {
+        return view().compare(pos1, count1, v, pos2, count2);
+    }
+
+    constexpr int compare(size_type pos1, size_type count1,
+                          const char_type* s, size_type count2) const
+    {
+        return view().compare(pos1, count1, s, count2);
+    }
 
     // Modifying methods
 
@@ -994,14 +1051,14 @@ public:
     }
 
     template<std::convertible_to<string_view_type> StringViewLike>
-        requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
+        requires (!std::convertible_to<const StringViewLike&, const char_type*>)
     constexpr basic_cow_string& assign(const StringViewLike& sv) {
         const string_view_type view = sv;
         return assign(view.begin(), view.end());
     }
 
     template<std::convertible_to<string_view_type> StringViewLike>
-        requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
+        requires (!std::convertible_to<const StringViewLike&, const char_type*>)
     constexpr basic_cow_string& operator=(const StringViewLike& sv) {
         return assign(sv);
     }

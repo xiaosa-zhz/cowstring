@@ -521,7 +521,12 @@ private:
         static constexpr std::less_equal<void> le = {};
         const auto ptr = std::to_address(it);
         const auto v = view();
-        return le(v.data(), ptr) && le(ptr, v.data() + v.size());
+        const bool within = le(v.data(), ptr) && le(ptr, v.data() + v.size());
+        if (within) {
+            // Check if some devil break strict aliasing rules.
+            contract_assert(std::is_convertible_v<decltype(ptr), const char_type*>);
+        }
+        return within;
     }
 
 public:
@@ -1482,12 +1487,13 @@ public:
     {
         check_pos(pos);
         if constexpr (details::may_fast_route<Iter, Sent>) {
+            const size_type add_size = std::ranges::distance(iter, sent);
             if (!is_my_pointer(iter)) {
-                const size_type old_size = size();
+                // The fast path for when iter is not alias with current string data
                 auto i = std::forward<Iter>(iter);
                 auto s = std::forward<Sent>(sent);
+                const size_type old_size = size();
                 const size_type rcount = std::ranges::min(count, old_size - pos);
-                const size_type add_size = std::ranges::distance(i, s);
                 const size_type new_size = old_size - rcount + add_size;
                 if (new_size == old_size) {
                     char_type* const data = exclusive_data();
@@ -1499,7 +1505,7 @@ public:
                     std::ranges::copy(i, s, data + pos);
                 } else {
                     char_type* const data = exclusive_data();
-                    std::ranges::move(i, s, data + pos);
+                    std::ranges::copy(i, s, data + pos);
                     if (add_size != rcount) {
                         std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
                     }
@@ -1507,7 +1513,51 @@ public:
                 }
                 return *this;
             }
+            if constexpr (std::contiguous_iterator<std::decay_t<Iter>>) {
+                if (exclusive()) {
+                    // Some non-owning users are aliasing us, but we can
+                    // try to do modification in-place if possible.
+                    // They are invalidated anyway.
+                    const size_type old_size = size();
+                    const size_type rcount = std::ranges::min(count, old_size - pos);
+                    const size_type new_size = old_size - rcount + add_size;
+                    if (new_size <= capacity()) {
+                        // Capacity is enough, so no reallocation happens and
+                        // the source range stays valid during the operation.
+                        resize(new_size);
+                        const char_type* const src = std::to_address(iter);
+                        char_type* const dst = storage.data() + pos;
+                        const size_type tail = old_size - pos - rcount;
+                        if (add_size != 0 && add_size <= rcount) {
+                            // Source goes first, because the tail moves left and
+                            // may overwrite the source otherwise.
+                            std::memmove(src, dst, add_size);
+                        }
+                        if (tail != 0 && add_size != rcount) {
+                            std::memmove(dst + rcount, dst + add_size, tail);
+                        }
+                        if (add_size > rcount) {
+                            // The tail has moved right, relocate the source accordingly.
+                            const char_type* const old_end = dst + rcount;
+                            if (src + add_size <= old_end) {
+                                // Entirely before the tail, not affected.
+                                std::memmove(src, dst, add_size);
+                            } else if (src >= old_end) {
+                                // Entirely inside the old tail, shifted by the growth.
+                                std::memmove(src + (add_size - rcount), dst, add_size);
+                            } else {
+                                // Straddles the replaced range and the tail.
+                                const size_type nleft = old_end - src;
+                                std::memmove(src, dst, nleft);
+                                std::memmove(dst + add_size, dst + nleft, add_size - nleft);
+                            }
+                        }
+                        return *this;
+                    }
+                }
+            }
         }
+        // Fallback
         std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
         string_type cp(std::from_range, std::move(r), get_allocator());
         return replace(pos, count, cp);

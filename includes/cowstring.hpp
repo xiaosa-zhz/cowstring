@@ -284,6 +284,15 @@ private:
     pointer cur = nullptr;
 };
 
+template<typename CharT>
+void strmov(const CharT* src, const CharT* src_end, CharT* dst) noexcept {
+    if (dst < src) {
+        std::ranges::copy(src, src_end, dst);
+    } else if (dst > src) {
+        std::ranges::copy_backward(src, src_end, dst + (src_end - src));
+    }
+}
+
 } // namespace cow::details
 
 template<typename CharT, typename Allocator = std::allocator<CharT>>
@@ -1550,48 +1559,53 @@ public:
                     const size_type old_size = size();
                     const size_type rcount = std::ranges::min(count, old_size - pos);
                     const size_type new_size = old_size - rcount + add_size;
-                    if (new_size <= capacity()) {
+                    const size_type cap = capacity();
+                    if (new_size <= cap) {
                         // Capacity is enough, so no reallocation happens and
                         // the source range stays valid during the operation.
-                        const char_type* const src = std::to_address(iter);
                         char_type* const data = storage.data();
-                        const size_type src_off = static_cast<size_type>(src - data);
-                        const size_type old_end_off = pos + rcount;
-                        const size_type tail = old_size - old_end_off;
-                        constexpr std::size_t char_bytes = sizeof(char_type);
+                        char_type* const old_end = data + old_size;
+                        char_type* const new_end = data + new_size;
+                        const char_type* const src = std::to_address(iter);
+                        const char_type* const src_end = src + add_size;
+                        char_type* const dst = data + pos;
+                        char_type* const dst_end = dst + rcount;
+                        char_type* const tail = new_end - (old_end - dst_end);
                         if (new_size == old_size) {
-                            std::memmove(data + pos, src, add_size * char_bytes);
-                            return *this;
-                        }
-                        if (new_size < old_size) {
+                            details::strmov(src, src_end, dst);
+                        } else if (new_size < old_size) {
                             // Move the source and tail before shrinking.
                             // resize() writes a null terminator at the new end,
                             // which used to clobber data that was still needed
                             // by the tail move.
-                            std::memmove(data + pos, src, add_size * char_bytes);
-                            if (tail != 0) {
-                                std::memmove(data + pos + add_size,
-                                             data + old_end_off,
-                                             tail * char_bytes);
-                            }
+                            details::strmov(src, src_end, dst);
+                            details::strmov(dst_end, old_end, tail);
                             resize(new_size);
-                            return *this;
-                        }
-                        // Growing: move the tail right before writing the
-                        // source. If the source overlaps the old tail, that
-                        // move would clobber it; fall back to the snapshot
-                        // path instead of trying to relocate it in place.
-                        if (src_off + add_size <= old_end_off) {
+                        } else {
+                            // Growing
                             resize(new_size);
-                            char_type* const dst = storage.data() + pos;
-                            if (tail != 0) {
-                                std::memmove(dst + add_size,
-                                             data + old_end_off,
-                                             tail * char_bytes);
+                            if (src <= dst) {
+                                // Source lies before (or at) the destination,
+                                // so moving the tail cannot clobber it.
+                                details::strmov(dst_end, old_end, tail);
+                                details::strmov(src, src_end, dst);
+                            } else {
+                                // Source starts right of the destination.
+                                // The part before the old tail is copied in place,
+                                // the rest is relocated with the tail and then
+                                // copied from its new location.
+                                const difference_type prefix = std::ranges::max(dst_end - src, 0z);
+                                if (prefix != 0) {
+                                    details::strmov(src, dst_end, dst);
+                                }
+                                details::strmov(dst_end, old_end, tail);
+                                const char_type* const moved =
+                                    (src < dst_end ? dst_end : src) + add_size - rcount;
+                                details::strmov(moved, moved + (add_size - prefix),
+                                                dst + prefix);
                             }
-                            std::memmove(dst, src, add_size * char_bytes);
-                            return *this;
                         }
+                        return *this;
                     }
                 }
             }

@@ -1614,6 +1614,27 @@ private:
     storage_type storage = {};
 };
 
+template<typename Iter, std::sentinel_for<Iter> Sent,
+         typename Allocator = std::allocator<std::remove_cv_t<std::iter_value_t<Iter>>>>
+basic_cow_string(Iter, Sent, Allocator = Allocator())
+    -> basic_cow_string<std::remove_cv_t<std::iter_value_t<Iter>>, Allocator>;
+
+template<typename CharT, typename Allocator = std::allocator<CharT>>
+explicit basic_cow_string(std::basic_string_view<CharT>, Allocator = Allocator())
+    -> basic_cow_string<CharT, Allocator>;
+
+template<typename CharT, typename Allocator = std::allocator<CharT>>
+basic_cow_string(std::basic_string_view<CharT>,
+                 typename basic_cow_string<CharT, Allocator>::size_type,
+                 typename basic_cow_string<CharT, Allocator>::size_type,
+                 Allocator = Allocator())
+    -> basic_cow_string<CharT, Allocator>;
+
+template<ranges::input_range R,
+         class Alloc = std::allocator<std::remove_cv_t<ranges::range_value_t<R>>>>
+basic_cow_string(std::from_range_t, R&&, Alloc = Alloc())
+    -> basic_cow_string<ranges::range_value_t<R>, Alloc>;
+
 template<typename CharT, typename Allocator, typename COWString = basic_cow_string<CharT, Allocator>>
 constexpr COWString operator+(basic_cow_string<CharT, Allocator> lhs,
                               basic_cow_string<CharT, Allocator> rhs)

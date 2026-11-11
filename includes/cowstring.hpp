@@ -695,7 +695,7 @@ public:
 
     template<std::convertible_to<string_view_type> StringViewLike>
         requires (!std::convertible_to<const StringViewLike&, const char_type*>)
-              && (!std::same_as<std::decay_t<StringViewLike>, basic_cow_string>)
+              && (!std::same_as<StringViewLike, basic_cow_string>)
     constexpr basic_cow_string(const StringViewLike& sv, const allocator_type& alloc)
         : basic_cow_string(alloc)
     {
@@ -947,7 +947,7 @@ public:
 
     // Modifying methods
 
-    // Make a exlusive writable string if it not already is
+    // Make a exclusive writable string if it not already is
     void ensure_exclusive() { (void) exclusive_data(); }
 
     constexpr void swap(basic_cow_string& other) noexcept(always_equal_alloc || POCS) {
@@ -1563,6 +1563,81 @@ public:
 private:
     storage_type storage = {};
 };
+
+template<typename CharT, typename Allocator, typename COWString = basic_cow_string<CharT, Allocator>>
+constexpr COWString operator+(basic_cow_string<CharT, Allocator> lhs,
+                              basic_cow_string<CharT, Allocator> rhs)
+{
+    if consteval {
+        return COWString(std::basic_string<CharT>(lhs) + std::basic_string<CharT>(rhs));
+    } else {
+        const auto total_size = lhs.size() + rhs.size();
+        const auto lhs_capacity = lhs.capacity();
+        const auto rhs_capacity = rhs.capacity();
+        if (lhs.exclusive() && lhs_capacity >= total_size) {
+            lhs.append(rhs);
+            return lhs;
+        }
+        if (rhs.exclusive() && rhs_capacity >= total_size) {
+            rhs.insert(0, lhs);
+            return rhs;
+        }
+        lhs.append(rhs);
+        return lhs;
+    }
+}
+
+template<typename CharT, typename Allocator, typename StringViewLike,
+         typename COWString = basic_cow_string<CharT, Allocator>>
+    requires std::convertible_to<const StringViewLike&, typename COWString::string_view_type>
+          && (!std::convertible_to<const StringViewLike&, const CharT*>)
+          && (!std::same_as<StringViewLike, COWString>)
+constexpr COWString operator+(basic_cow_string<CharT, Allocator> lhs,
+                              const StringViewLike& rhs)
+{
+    if consteval {
+        return COWString(std::basic_string<CharT>(lhs) + std::basic_string<CharT>(rhs));
+    } else {
+        lhs.append(rhs);
+        return lhs;
+    }
+}
+
+template<typename CharT, typename Allocator, typename StringViewLike,
+         typename COWString = basic_cow_string<CharT, Allocator>>
+    requires std::convertible_to<const StringViewLike&, typename COWString::string_view_type>
+          && (!std::convertible_to<const StringViewLike&, const CharT*>)
+          && (!std::same_as<StringViewLike, CharT>)
+constexpr COWString operator+(const StringViewLike& lhs,
+                              basic_cow_string<CharT, Allocator> rhs)
+{
+    if consteval {
+        return COWString(std::basic_string<CharT>(lhs) + std::basic_string<CharT>(rhs));
+    } else {
+        rhs.insert(0, lhs);
+        return rhs;
+    }
+}
+
+template<typename CharT, typename Allocator, typename COWString = basic_cow_string<CharT, Allocator>>
+constexpr COWString operator+(basic_cow_string<CharT, Allocator> lhs, CharT rhs) {
+    if consteval {
+        return COWString(std::basic_string<CharT>(lhs) + rhs);
+    } else {
+        lhs.push_back(rhs);
+        return lhs;
+    }
+}
+
+template<typename CharT, typename Allocator, typename COWString = basic_cow_string<CharT, Allocator>>
+constexpr COWString operator+(CharT lhs, basic_cow_string<CharT, Allocator> rhs) {
+    if consteval {
+        return COWString(lhs + std::basic_string<CharT>(rhs));
+    } else {
+        rhs.insert(0, lhs);
+        return rhs;
+    }
+}
 
 using cow_string = basic_cow_string<char>;
 using cow_wstring = basic_cow_string<wchar_t>;

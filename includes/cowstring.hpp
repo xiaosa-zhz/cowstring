@@ -19,6 +19,7 @@
 #include <ranges>
 #include <functional>
 #include <numeric>
+#include <cstring>
 
 namespace cow {
 
@@ -806,12 +807,20 @@ public:
         return view().find(ch, pos);
     }
 
+    constexpr size_type find(const char_type* s, size_type pos, size_type count) const noexcept {
+        return view().find(s, pos, count);
+    }
+
     constexpr size_type rfind(string_view_type str, size_type pos = npos) const noexcept {
         return view().rfind(str, pos);
     }
 
     constexpr size_type rfind(char_type ch, size_type pos = npos) const noexcept {
         return view().rfind(ch, pos);
+    }
+
+    constexpr size_type rfind(const char_type* s, size_type pos, size_type count) const noexcept {
+        return view().rfind(s, pos, count);
     }
 
     constexpr size_type find_first_of(string_view_type str, size_type pos = 0) const noexcept {
@@ -822,12 +831,20 @@ public:
         return view().find_first_of(ch, pos);
     }
 
+    constexpr size_type find_first_of(const char_type* s, size_type pos, size_type count) const noexcept {
+        return view().find_first_of(s, pos, count);
+    }
+
     constexpr size_type find_first_not_of(string_view_type str, size_type pos = 0) const noexcept {
         return view().find_first_not_of(str, pos);
     }
 
     constexpr size_type find_first_not_of(char_type ch, size_type pos = 0) const noexcept {
         return view().find_first_not_of(ch, pos);
+    }
+
+    constexpr size_type find_first_not_of(const char_type* s, size_type pos, size_type count) const noexcept {
+        return view().find_first_not_of(s, pos, count);
     }
 
     constexpr size_type find_last_of(string_view_type str, size_type pos = npos) const noexcept {
@@ -837,6 +854,9 @@ public:
     constexpr size_type find_last_of(char_type ch, size_type pos = npos) const noexcept {
         return view().find_last_of(ch, pos);
     }
+    constexpr size_type find_last_of(const char_type* s, size_type pos, size_type count) const noexcept {
+        return view().find_last_of(s, pos, count);
+    }
 
     constexpr size_type find_last_not_of(string_view_type str, size_type pos = npos) const noexcept {
         return view().find_last_not_of(str, pos);
@@ -844,6 +864,10 @@ public:
 
     constexpr size_type find_last_not_of(char_type ch, size_type pos = npos) const noexcept {
         return view().find_last_not_of(ch, pos);
+    }
+
+    constexpr size_type find_last_not_of(const char_type* s, size_type pos, size_type count) const noexcept {
+        return view().find_last_not_of(s, pos, count);
     }
 
     constexpr bool starts_with(string_view_type str) const noexcept {
@@ -948,6 +972,10 @@ public:
                           const char_type* s, size_type count2) const
     {
         return view().compare(pos1, count1, s, count2);
+    }
+
+    constexpr size_type copy(CharT* dest, size_type count, size_type pos = 0) const {
+        return view().copy(dest, count, pos);
     }
 
     // Modifying methods
@@ -1531,25 +1559,25 @@ public:
                         if (add_size != 0 && add_size <= rcount) {
                             // Source goes first, because the tail moves left and
                             // may overwrite the source otherwise.
-                            std::memmove(src, dst, add_size);
+                            std::memmove(dst, src, add_size);
                         }
                         if (tail != 0 && add_size != rcount) {
-                            std::memmove(dst + rcount, dst + add_size, tail);
+                            std::memmove(dst + add_size, dst + rcount, tail);
                         }
                         if (add_size > rcount) {
                             // The tail has moved right, relocate the source accordingly.
                             const char_type* const old_end = dst + rcount;
                             if (src + add_size <= old_end) {
                                 // Entirely before the tail, not affected.
-                                std::memmove(src, dst, add_size);
+                                std::memmove(dst, src, add_size);
                             } else if (src >= old_end) {
                                 // Entirely inside the old tail, shifted by the growth.
-                                std::memmove(src + (add_size - rcount), dst, add_size);
+                                std::memmove(dst, src + (add_size - rcount), add_size);
                             } else {
                                 // Straddles the replaced range and the tail.
                                 const size_type nleft = old_end - src;
-                                std::memmove(src, dst, nleft);
-                                std::memmove(dst + add_size, dst + nleft, add_size - nleft);
+                                std::memmove(dst, src, nleft);
+                                std::memmove(dst + nleft, dst + add_size, add_size - nleft);
                             }
                         }
                         return *this;
@@ -1630,10 +1658,10 @@ basic_cow_string(std::basic_string_view<CharT>,
                  Allocator = Allocator())
     -> basic_cow_string<CharT, Allocator>;
 
-template<ranges::input_range R,
-         class Alloc = std::allocator<std::remove_cv_t<ranges::range_value_t<R>>>>
+template<std::ranges::input_range R,
+         class Alloc = std::allocator<std::remove_cv_t<std::ranges::range_value_t<R>>>>
 basic_cow_string(std::from_range_t, R&&, Alloc = Alloc())
-    -> basic_cow_string<ranges::range_value_t<R>, Alloc>;
+    -> basic_cow_string<std::ranges::range_value_t<R>, Alloc>;
 
 template<typename CharT, typename Allocator, typename COWString = basic_cow_string<CharT, Allocator>>
 constexpr COWString operator+(basic_cow_string<CharT, Allocator> lhs,

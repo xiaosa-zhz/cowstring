@@ -210,14 +210,8 @@ template<typename R, typename CharT>
 concept container_compatible_range = std::ranges::input_range<R>
     && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
 
-template<typename Iter>
-concept can_to_address = std::contiguous_iterator<Iter> || requires(const Iter& it) {
-    requires requires { std::pointer_traits<Iter>::to_address(it); }
-          || requires { it.operator->(); };
-};
-
 template<typename Iter, typename Sent>
-concept may_fast_route = can_to_address<std::decay_t<Iter>>
+concept may_fast_route = std::contiguous_iterator<std::decay_t<Iter>>
     && std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>;
 
 template<typename CharT>
@@ -523,7 +517,7 @@ private:
 
     // Modification in-place only requires source range is valid,
     // so that it may have self-reference.
-    template<details::can_to_address It>
+    template<std::contiguous_iterator It>
     bool is_my_pointer(const It& it) const noexcept {
         static constexpr std::less_equal<void> le = {};
         const auto ptr = std::to_address(it);

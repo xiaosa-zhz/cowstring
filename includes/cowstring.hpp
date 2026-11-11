@@ -286,11 +286,7 @@ private:
 
 template<typename CharT>
 void strmov(const CharT* src, const CharT* src_end, CharT* dst) noexcept {
-    if (dst < src) {
-        std::ranges::copy(src, src_end, dst);
-    } else if (dst > src) {
-        std::ranges::copy_backward(src, src_end, dst + (src_end - src));
-    }
+    std::memmove(dst, src, (src_end - src) * sizeof(CharT));
 }
 
 } // namespace cow::details
@@ -543,6 +539,9 @@ private:
     bool inplace_self_replace(size_type pos, size_type count,
                               const char_type* const src,
                               const size_type srclen) noexcept
+        pre (pos <= size())
+        pre (src != nullptr)
+        post (r : !r || exclusive())
     {
         if (!exclusive()) {
             return false;

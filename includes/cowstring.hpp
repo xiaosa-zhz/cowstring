@@ -20,6 +20,7 @@
 #include <functional>
 #include <numeric>
 #include <cstring>
+#include <stdexcept>
 
 namespace cow {
 
@@ -609,8 +610,8 @@ public:
                                const allocator_type& alloc = allocator_type())
         : basic_cow_string(alloc)
     {
-        if (!other.status().allocated ||
-            (this->get_allocator() == other.get_allocator() && pos == 0 && count >= size())) {
+        if (pos == 0 && count >= other.size() &&
+            (!other.status().allocated || this->get_allocator() == other.get_allocator())) {
             set_states_on_copy(other);
         } else {
             basic_cow_string(other.subview(pos, count), get_allocator()).swap(*this);
@@ -635,6 +636,7 @@ public:
                                const allocator_type& alloc = allocator_type())
         : basic_cow_string(alloc)
     {
+        other.check_pos(pos);
         if consteval {
             if (pos == 0 && count >= other.size()) {
                 set_states_on_move(std::move(other));
@@ -642,9 +644,8 @@ public:
                 write_static_string(other.subview(pos, count));
             }
         } else {
-            const auto shrink_in_place = [this](size_type pos, size_type count) noexcept
-                pre (exclusive())
-            {
+            const auto shrink_in_place = [this](size_type pos, size_type count) noexcept {
+                contract_assert(exclusive());
                 char_type* const data = storage.data();
                 const size_type original_size = size();
                 const size_type final_size = std::ranges::min(count, original_size - pos);
@@ -898,7 +899,7 @@ public:
         return static_cast<const allocator_type&>(*this);
     }
 
-    constexpr string_view_type subview(size_type pos = 0, size_type count = npos) const noexcept {
+    constexpr string_view_type subview(size_type pos = 0, size_type count = npos) const {
         return view().substr(pos, count);
     }
 
@@ -1552,35 +1553,45 @@ public:
                     if (new_size <= capacity()) {
                         // Capacity is enough, so no reallocation happens and
                         // the source range stays valid during the operation.
-                        resize(new_size);
                         const char_type* const src = std::to_address(iter);
-                        char_type* const dst = storage.data() + pos;
-                        const size_type tail = old_size - pos - rcount;
-                        if (add_size != 0 && add_size <= rcount) {
-                            // Source goes first, because the tail moves left and
-                            // may overwrite the source otherwise.
-                            std::memmove(dst, src, add_size);
+                        char_type* const data = storage.data();
+                        const size_type src_off = static_cast<size_type>(src - data);
+                        const size_type old_end_off = pos + rcount;
+                        const size_type tail = old_size - old_end_off;
+                        constexpr std::size_t char_bytes = sizeof(char_type);
+                        if (new_size == old_size) {
+                            std::memmove(data + pos, src, add_size * char_bytes);
+                            return *this;
                         }
-                        if (tail != 0 && add_size != rcount) {
-                            std::memmove(dst + add_size, dst + rcount, tail);
-                        }
-                        if (add_size > rcount) {
-                            // The tail has moved right, relocate the source accordingly.
-                            const char_type* const old_end = dst + rcount;
-                            if (src + add_size <= old_end) {
-                                // Entirely before the tail, not affected.
-                                std::memmove(dst, src, add_size);
-                            } else if (src >= old_end) {
-                                // Entirely inside the old tail, shifted by the growth.
-                                std::memmove(dst, src + (add_size - rcount), add_size);
-                            } else {
-                                // Straddles the replaced range and the tail.
-                                const size_type nleft = old_end - src;
-                                std::memmove(dst, src, nleft);
-                                std::memmove(dst + nleft, dst + add_size, add_size - nleft);
+                        if (new_size < old_size) {
+                            // Move the source and tail before shrinking.
+                            // resize() writes a null terminator at the new end,
+                            // which used to clobber data that was still needed
+                            // by the tail move.
+                            std::memmove(data + pos, src, add_size * char_bytes);
+                            if (tail != 0) {
+                                std::memmove(data + pos + add_size,
+                                             data + old_end_off,
+                                             tail * char_bytes);
                             }
+                            resize(new_size);
+                            return *this;
                         }
-                        return *this;
+                        // Growing: move the tail right before writing the
+                        // source. If the source overlaps the old tail, that
+                        // move would clobber it; fall back to the snapshot
+                        // path instead of trying to relocate it in place.
+                        if (src_off + add_size <= old_end_off) {
+                            resize(new_size);
+                            char_type* const dst = storage.data() + pos;
+                            if (tail != 0) {
+                                std::memmove(dst + add_size,
+                                             data + old_end_off,
+                                             tail * char_bytes);
+                            }
+                            std::memmove(dst, src, add_size * char_bytes);
+                            return *this;
+                        }
                     }
                 }
             }

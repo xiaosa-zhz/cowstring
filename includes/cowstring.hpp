@@ -257,7 +257,7 @@ public:
     constexpr string_iterator& operator=(const string_iterator&) = default;
     explicit constexpr string_iterator(pointer ptr) noexcept : cur(ptr) {}
 
-    operator string_iterator<CharT, true>() noexcept requires(!IsConst) {
+    constexpr operator string_iterator<CharT, true>() const noexcept requires(!IsConst) {
         return string_iterator<CharT, true>(cur);
     }
 
@@ -415,7 +415,7 @@ private:
     }
 
     constexpr void set_states_on_copy(const basic_cow_string& other) noexcept
-        pre (this->get_allocator() == other.get_allocator() || !other.status().allocated)
+        pre (!other.status().allocated || this->get_allocator() == other.get_allocator())
     {
         if (other.status().allocated) {
             // owned or shared string
@@ -583,38 +583,91 @@ public:
     constexpr basic_cow_string(std::nullptr_t) = delete;
 
     constexpr basic_cow_string(const basic_cow_string& other) noexcept(always_equal_alloc)
-        : allocator_type(other.allocator_copy())
+        : basic_cow_string(other, other.allocator_copy())
+    {}
+
+    template<typename COWString>
+        requires std::same_as<std::decay_t<COWString>, basic_cow_string>
+    constexpr basic_cow_string(COWString&& other, const allocator_type& alloc)
+        noexcept(always_equal_alloc)
+        : basic_cow_string(std::forward<COWString>(other), 0, npos, alloc)
+    {}
+
+    constexpr basic_cow_string(const basic_cow_string& other, size_type pos,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(other, pos, npos, alloc)
+    {}
+
+    constexpr basic_cow_string(const basic_cow_string& other,
+                               size_type pos, size_type count,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(alloc)
     {
-        if (this->get_allocator() == other.get_allocator() || !other.status().allocated) {
+        if (!other.status().allocated ||
+            (this->get_allocator() == other.get_allocator() && pos == 0 && count >= size())) {
             set_states_on_copy(other);
         } else {
-            basic_cow_string(other.view(), get_allocator()).swap(*this);
+            basic_cow_string(other.subview(pos, count), get_allocator()).swap(*this);
         }
     }
 
     constexpr basic_cow_string(basic_cow_string&& other) noexcept
-        : allocator_type(std::move(other).allocator_move())
+        : basic_cow_string(std::move(other).allocator_move())
     {
+        // This ctor seems not able to delegate to another ctor safely,
+        // so we handle the move manually here.
         set_states_on_move(std::move(other));
     }
 
-    constexpr basic_cow_string(const basic_cow_string& other,
-                               size_type pos, size_type count)
-        : basic_cow_string(other.substr(pos, count))
-    {}
-
-    constexpr basic_cow_string(const basic_cow_string& other, size_type pos)
-        : basic_cow_string(other, pos, npos)
+    constexpr basic_cow_string(basic_cow_string&& other, size_type pos,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(std::move(other), pos, npos, alloc)
     {}
 
     constexpr basic_cow_string(basic_cow_string&& other,
-                               size_type pos, size_type count)
-        : basic_cow_string(std::move(other).substr(pos, count))
-    {}
-
-    constexpr basic_cow_string(basic_cow_string&& other, size_type pos)
-        : basic_cow_string(std::move(other), pos, npos)
-    {}
+                               size_type pos, size_type count,
+                               const allocator_type& alloc = allocator_type())
+        : basic_cow_string(alloc)
+    {
+        if consteval {
+            if (pos == 0 && count >= other.size()) {
+                set_states_on_move(std::move(other));
+            } else {
+                write_static_string(other.subview(pos, count));
+            }
+        } else {
+            const auto shrink_in_place = [this](size_type pos, size_type count) noexcept
+                pre (exclusive())
+            {
+                char_type* const data = storage.data();
+                const size_type original_size = size();
+                const size_type final_size = std::ranges::min(count, original_size - pos);
+                std::ranges::copy_n(data + pos, final_size, data);
+                resize(final_size);
+            };
+            if (other.status() == details::small) {
+                set_states_on_move(std::move(other));
+                shrink_in_place(pos, count);
+                return;
+            }
+            if (other.status() == details::literal && pos == 0 && count >= other.size()) {
+                set_states_on_move(std::move(other));
+                return;
+            }
+            if (this->get_allocator() == other.get_allocator()) {
+                if (pos == 0 && count >= other.size()) {
+                    set_states_on_move(std::move(other));
+                    return;
+                }
+                if (other.exclusive()) {
+                    set_states_on_move(std::move(other));
+                    shrink_in_place(pos, count);
+                    return;
+                }
+            }
+            basic_cow_string(other.subview(pos, count), get_allocator()).swap(*this);
+        }
+    }
 
     constexpr basic_cow_string(std::initializer_list<char_type> il,
                                const allocator_type& alloc = allocator_type())
@@ -636,8 +689,14 @@ public:
 
     template<std::convertible_to<string_view_type> StringViewLike>
         requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
-    constexpr basic_cow_string(const StringViewLike& sv,
-                               const allocator_type& alloc = allocator_type()) 
+    explicit constexpr basic_cow_string(const StringViewLike& sv) 
+        : basic_cow_string(string_view_type(sv), allocator_type())
+    {}
+
+    template<std::convertible_to<string_view_type> StringViewLike>
+        requires (!std::convertible_to<std::decay_t<StringViewLike>, const char_type*>)
+              && (!std::same_as<std::decay_t<StringViewLike>, basic_cow_string>)
+    constexpr basic_cow_string(const StringViewLike& sv, const allocator_type& alloc)
         : basic_cow_string(alloc)
     {
         const string_view_type view = sv;
@@ -712,7 +771,7 @@ public:
     constexpr size_type length() const noexcept { return size(); }
     constexpr bool empty() const noexcept { return size() == 0; }
     constexpr string_view_type view() const noexcept { return storage.view(); }
-    constexpr string_type string() const { return string_type(view(), allocator_copy()); }
+    constexpr string_type string() const { return string_type(view(), get_allocator()); }
     constexpr operator string_view_type() const noexcept { return view(); }
     constexpr basic_cow_string clone() const { return { view(), allocator_copy() }; }
     constexpr const_pointer data() const noexcept { return storage.data(); }
@@ -815,46 +874,19 @@ public:
     }
 
     constexpr basic_cow_string substr(size_type pos = 0, size_type count = npos) const {
-        if (pos == 0 && count >= size()) {
-            return *this;
-        } else {
-            return { subview(pos, count), allocator_copy() };
-        }
+        return { *this, pos, count, get_allocator() };
     }
 
     constexpr basic_cow_string substr(size_type pos = 0, size_type count = npos) && {
-        if consteval {
-            return std::as_const(*this).substr(pos, count);
-        } else {
-            const size_type original_size = size();
-            if (pos == 0 && count >= original_size) {
-                return std::move(*this);
-            } else if (exclusive()) {
-                if (pos > 0) {
-                    const string_view_type sub = subview(pos, count);
-                    if (sub.size() > storage.sso.capacity) {
-                        contract_assert(status() == details::owned);
-                        char_type* const data = storage.data();
-                        std::ranges::copy_n(sub.data(), sub.size(), data);
-                        data[sub.size()] = char_type();
-                        storage.dyn.size = sub.size();
-                    } else {
-                        write_sso_release(sub);
-                    }
-                } else if (count < original_size) {
-                    resize(count);
-                }
-                return std::move(*this);
-            } else {
-                return std::as_const(*this).substr(pos, count);
-            }
-        }
+        return { std::move(*this), pos, count, get_allocator() };
     }
 
     constexpr bool operator==(const basic_cow_string& other) const noexcept { return view() == other.view(); }
     constexpr bool operator==(string_view_type other) const noexcept { return view() == other; }
+    constexpr bool operator==(const char_type* other) const noexcept { return view() == string_view_type(other); }
     constexpr auto operator<=>(const basic_cow_string& other) const noexcept { return view() <=> other.view(); }
     constexpr auto operator<=>(string_view_type other) const noexcept { return view() <=> other; }
+    constexpr auto operator<=>(const char_type* other) const noexcept { return view() <=> string_view_type(other); }
 
     // Modifying methods
 
@@ -916,7 +948,7 @@ public:
             deallocate_if_needed();
             static_cast<allocator_type&>(*this) = other.get_allocator();
             set_states_on_copy(other);
-        } else if (this->get_allocator() == other.get_allocator() || !other.status().allocated) {
+        } else if (!other.status().allocated || this->get_allocator() == other.get_allocator()) {
             deallocate_if_needed();
             set_states_on_copy(other);
         } else {
@@ -945,7 +977,7 @@ public:
             deallocate_if_needed();
             static_cast<allocator_type&>(*this) = static_cast<allocator_type&&>(other);
             set_states_on_move(std::move(other));
-        } else if (this->get_allocator() == other.get_allocator() || !other.status().allocated) {
+        } else if (!other.status().allocated || this->get_allocator() == other.get_allocator()) {
             deallocate_if_needed();
             set_states_on_move(std::move(other));
         } else {
@@ -1212,6 +1244,13 @@ public:
         return insert(index, str.begin(), str.end());
     }
 
+    basic_cow_string& insert(size_type index, string_view_type str,
+                             size_type s_index, size_type count = npos)
+        post (exclusive())
+    {
+        return insert(index, str.substr(s_index, count));
+    }
+
     basic_cow_string& insert(size_type index, const char_type* s, size_type count)
         post (exclusive())
     {
@@ -1304,6 +1343,13 @@ public:
         return begin() + index;
     }
 
+    basic_cow_string& replace(size_type pos, size_type count, string_view_type str,
+                              size_type pos2, size_type count2 = npos)
+        post (exclusive())
+    {
+        return replace(pos, count, str.substr(pos2, count2));
+    }
+
     basic_cow_string& replace(size_type pos, size_type count, string_view_type str)
         post (exclusive())
     {
@@ -1327,7 +1373,8 @@ public:
         return replace(pos, count, string_view_type(cstr, count2));
     }
 
-    basic_cow_string& replace(const_iterator first, const_iterator last, const char_type* cstr, size_type count2)
+    basic_cow_string& replace(const_iterator first, const_iterator last,
+                              const char_type* cstr, size_type count2)
         post (exclusive())
     {
         return replace(first, last, string_view_type(cstr, count2));

@@ -1548,13 +1548,15 @@ public:
         } else if (new_size > old_size) {
             resize(new_size);
             char_type* const data = storage.data();
-            std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
+            details::strmov(data + pos + rcount, data + old_size,
+                            data + pos + add_size);
             std::ranges::fill_n(data + pos, add_size, ch);
         } else {
             char_type* const data = exclusive_data();
             std::ranges::fill_n(data + pos, add_size, ch);
             if (add_size != rcount) {
-                std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+                details::strmov(data + pos + rcount, data + old_size,
+                                data + pos + add_size);
             }
             resize(new_size);
         }
@@ -1589,17 +1591,19 @@ public:
                 const size_type new_size = old_size - rcount + add_size;
                 if (new_size == old_size) {
                     char_type* const data = exclusive_data();
-                    std::ranges::copy(src, src_end, data + pos);
+                    details::strmov(src, src_end, data + pos);
                 } else if (new_size > old_size) {
                     resize(new_size);
                     char_type* const data = storage.data();
-                    std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
-                    std::ranges::copy(src, src_end, data + pos);
+                    details::strmov(data + pos + rcount, data + old_size,
+                                    data + pos + add_size);
+                    details::strmov(src, src_end, data + pos);
                 } else {
                     char_type* const data = exclusive_data();
-                    std::ranges::copy(src, src_end, data + pos);
+                    details::strmov(src, src_end, data + pos);
                     if (add_size != rcount) {
-                        std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
+                        details::strmov(data + pos + rcount, data + old_size,
+                                        data + pos + add_size);
                     }
                     resize(new_size);
                 }

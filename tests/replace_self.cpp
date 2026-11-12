@@ -192,6 +192,80 @@ void run_selected(results& result) {
 }
 
 template<typename CharT>
+void check_external(results& result, const std::basic_string<CharT>& old,
+                    std::size_t pos, std::size_t count,
+                    const std::basic_string<CharT>& source,
+                    std::size_t cap_request, bool shrink, bool pointer_source) {
+    using string_type = cow::basic_cow_string<CharT>;
+
+    const std::size_t rcount = std::min(count, old.size() - pos);
+    const std::basic_string<CharT> want =
+        old.substr(0, pos) + source + old.substr(pos + rcount);
+
+    string_type s(old.begin(), old.end());
+    if (cap_request != 0) {
+        s.reserve(cap_request);
+    }
+    if (shrink) {
+        s.shrink_to_fit();
+    }
+
+    if (pointer_source) {
+        s.replace(pos, count, source.data(), source.data() + source.size());
+    } else {
+        s.replace(pos, count, source.begin(), source.end());
+    }
+
+    ++result.cases;
+    const std::basic_string<CharT> got(s.c_str(), s.size());
+    if (got != want || s.c_str()[s.size()] != CharT()) {
+        ++result.failures;
+        if (result.failures <= 10) {
+            std::fprintf(stderr,
+                "FAIL external old-size=%zu pos=%zu count=%zu source-size=%zu "
+                "cap=%zu shrink=%d pointer=%d\n",
+                old.size(), pos, count, source.size(), s.capacity(),
+                int(shrink), int(pointer_source));
+            print_sequence("old   ", old);
+            print_sequence("source", source);
+            print_sequence("got   ", got);
+            print_sequence("want  ", want);
+        }
+    }
+}
+
+template<typename CharT>
+void run_external(results& result) {
+    using string_type = cow::basic_cow_string<CharT>;
+    for (std::size_t n : {std::size_t(0), std::size_t(1), std::size_t(5),
+                          std::size_t(10), std::size_t(31), std::size_t(64),
+                          std::size_t(129)}) {
+        const std::basic_string<CharT> old = make_old<CharT>(n);
+        for (std::size_t source_len : {std::size_t(0), std::size_t(1),
+                                       std::size_t(5), std::size_t(40)}) {
+            std::basic_string<CharT> source;
+            source.reserve(source_len);
+            for (std::size_t i = 0; i < source_len; ++i) {
+                source.push_back(static_cast<CharT>(CharT('A') + CharT((i * 5 + 1) % 26)));
+            }
+            for (std::size_t pos : {std::size_t(0), n / 2, n}) {
+                for (std::size_t count : {std::size_t(0), std::size_t(1), n / 2,
+                                          n, string_type::npos}) {
+                    for (std::size_t cap : {std::size_t(0), n + 1, 2 * n + 4}) {
+                        for (bool shrink : {false, true}) {
+                            check_external(result, old, pos, count, source,
+                                           cap, shrink, false);
+                            check_external(result, old, pos, count, source,
+                                           cap, shrink, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+template<typename CharT>
 void run_random(results& result, std::size_t iterations, std::uint64_t seed) {
     using string_type = cow::basic_cow_string<CharT>;
     std::mt19937_64 rng(seed);
@@ -224,6 +298,7 @@ results run_suite(const char* name, std::size_t exhaustive_n,
     results result;
     run_exhaustive<CharT>(result, exhaustive_n);
     run_selected<CharT>(result);
+    run_external<CharT>(result);
     run_random<CharT>(result, random_iterations, seed);
     std::printf("[replace_self] %-8s cases=%zu failures=%zu\n",
                 name, result.cases, result.failures);

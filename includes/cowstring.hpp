@@ -210,10 +210,6 @@ template<typename R, typename CharT>
 concept container_compatible_range = std::ranges::input_range<R>
     && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
 
-template<typename Iter, typename Sent>
-concept may_fast_route = std::contiguous_iterator<std::decay_t<Iter>>
-    && std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>;
-
 template<typename CharT>
 class literal_helper
 {
@@ -1582,26 +1578,26 @@ public:
         post (exclusive())
     {
         check_pos(pos);
-        if constexpr (details::may_fast_route<Iter, Sent>) {
+        if constexpr (std::contiguous_iterator<std::decay_t<Iter>>) {
             const size_type add_size = std::ranges::distance(iter, sent);
+            const char_type* const src = std::to_address(iter);
             if (!is_my_pointer(iter)) {
                 // The fast path for when iter is not alias with current string data
-                auto i = std::forward<Iter>(iter);
-                auto s = std::forward<Sent>(sent);
+                const char_type* const src_end = src + add_size;
                 const size_type old_size = size();
                 const size_type rcount = std::ranges::min(count, old_size - pos);
                 const size_type new_size = old_size - rcount + add_size;
                 if (new_size == old_size) {
                     char_type* const data = exclusive_data();
-                    std::ranges::copy(i, s, data + pos);
+                    std::ranges::copy(src, src_end, data + pos);
                 } else if (new_size > old_size) {
                     resize(new_size);
                     char_type* const data = storage.data();
                     std::ranges::copy_backward(data + pos + rcount, data + old_size, data + new_size);
-                    std::ranges::copy(i, s, data + pos);
+                    std::ranges::copy(src, src_end, data + pos);
                 } else {
                     char_type* const data = exclusive_data();
-                    std::ranges::copy(i, s, data + pos);
+                    std::ranges::copy(src, src_end, data + pos);
                     if (add_size != rcount) {
                         std::ranges::copy(data + pos + rcount, data + old_size, data + pos + add_size);
                     }
@@ -1609,17 +1605,18 @@ public:
                 }
                 return *this;
             }
-            if constexpr (std::contiguous_iterator<std::decay_t<Iter>>) {
-                const char_type* const src = std::to_address(iter);
-                if (inplace_self_replace(pos, count, src, add_size)) {
-                    return *this;
-                }
+            if (inplace_self_replace(pos, count, src, add_size)) {
+                return *this;
             }
+            // Fallback, but we already know length
+            string_type cp(src, add_size, get_allocator());
+            return replace(pos, count, cp);
+        } else {
+            // Fallback
+            std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
+            string_type cp(std::from_range, std::move(r), get_allocator());
+            return replace(pos, count, cp);
         }
-        // Fallback
-        std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
-        string_type cp(std::from_range, std::move(r), get_allocator());
-        return replace(pos, count, cp);
     }
 
     template<typename Iter, typename Sent>

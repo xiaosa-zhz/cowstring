@@ -279,6 +279,14 @@ void strmov(const CharT* src, const CharT* src_end, CharT* dst) noexcept {
     std::memmove(dst, src, (src_end - src) * sizeof(CharT));
 }
 
+template<typename S>
+concept string_like = requires(const S& s) {
+    std::basic_string_view<typename S::value_type>(s);
+};
+
+template<string_like S>
+using char_type = S::value_type;
+
 } // namespace cow::details
 
 template<typename CharT, typename Allocator = std::allocator<CharT>>
@@ -1679,16 +1687,16 @@ template<typename Iter, std::sentinel_for<Iter> Sent,
 basic_cow_string(Iter, Sent, Allocator = Allocator())
     -> basic_cow_string<std::remove_cv_t<std::iter_value_t<Iter>>, Allocator>;
 
-template<typename CharT, typename Allocator = std::allocator<CharT>>
-explicit basic_cow_string(std::basic_string_view<CharT>, Allocator = Allocator())
-    -> basic_cow_string<CharT, Allocator>;
+template<details::string_like S, typename Allocator = std::allocator<details::char_type<S>>>
+explicit basic_cow_string(const S&, Allocator = Allocator())
+    -> basic_cow_string<details::char_type<S>, Allocator>;
 
-template<typename CharT, typename Allocator = std::allocator<CharT>>
-basic_cow_string(std::basic_string_view<CharT>,
-                 typename basic_cow_string<CharT, Allocator>::size_type,
-                 typename basic_cow_string<CharT, Allocator>::size_type,
+template<details::string_like S, typename Allocator = std::allocator<details::char_type<S>>>
+basic_cow_string(const S&,
+                 typename basic_cow_string<details::char_type<S>, Allocator>::size_type,
+                 typename basic_cow_string<details::char_type<S>, Allocator>::size_type,
                  Allocator = Allocator())
-    -> basic_cow_string<CharT, Allocator>;
+    -> basic_cow_string<details::char_type<S>, Allocator>;
 
 template<std::ranges::input_range R,
          class Alloc = std::allocator<std::remove_cv_t<std::ranges::range_value_t<R>>>>

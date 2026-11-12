@@ -1001,14 +1001,6 @@ public:
         return view() <=> string_view_type(other);
     }
 
-    constexpr bool operator==(details::literal_helper<char_type> literal) const noexcept {
-        return view() == string_view_type(literal.data(), literal.size());
-    }
-
-    constexpr auto operator<=>(details::literal_helper<char_type> literal) const noexcept {
-        return view() <=> string_view_type(literal.data(), literal.size());
-    }
-
     constexpr int compare(details::literal_helper<char_type> literal) const noexcept {
         return view().compare(string_view_type(literal.data(), literal.size()));
     }

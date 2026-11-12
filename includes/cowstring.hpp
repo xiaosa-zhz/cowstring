@@ -1038,7 +1038,7 @@ public:
         return view().compare(pos1, count1, s, count2);
     }
 
-    constexpr size_type copy(CharT* dest, size_type count, size_type pos = 0) const {
+    constexpr size_type copy(char_type* dest, size_type count, size_type pos = 0) const {
         return view().copy(dest, count, pos);
     }
 

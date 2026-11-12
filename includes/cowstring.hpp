@@ -871,7 +871,7 @@ public:
         return view().find(ch, pos);
     }
 
-    constexpr size_type find(const char_type* s, size_type pos, size_type count) const noexcept {
+    constexpr size_type find(const char_type* s, size_type pos, size_type count) const {
         return view().find(s, pos, count);
     }
 
@@ -883,7 +883,7 @@ public:
         return view().rfind(ch, pos);
     }
 
-    constexpr size_type rfind(const char_type* s, size_type pos, size_type count) const noexcept {
+    constexpr size_type rfind(const char_type* s, size_type pos, size_type count) const {
         return view().rfind(s, pos, count);
     }
 
@@ -895,7 +895,7 @@ public:
         return view().find_first_of(ch, pos);
     }
 
-    constexpr size_type find_first_of(const char_type* s, size_type pos, size_type count) const noexcept {
+    constexpr size_type find_first_of(const char_type* s, size_type pos, size_type count) const {
         return view().find_first_of(s, pos, count);
     }
 
@@ -907,7 +907,7 @@ public:
         return view().find_first_not_of(ch, pos);
     }
 
-    constexpr size_type find_first_not_of(const char_type* s, size_type pos, size_type count) const noexcept {
+    constexpr size_type find_first_not_of(const char_type* s, size_type pos, size_type count) const {
         return view().find_first_not_of(s, pos, count);
     }
 
@@ -918,7 +918,7 @@ public:
     constexpr size_type find_last_of(char_type ch, size_type pos = npos) const noexcept {
         return view().find_last_of(ch, pos);
     }
-    constexpr size_type find_last_of(const char_type* s, size_type pos, size_type count) const noexcept {
+    constexpr size_type find_last_of(const char_type* s, size_type pos, size_type count) const {
         return view().find_last_of(s, pos, count);
     }
 
@@ -930,7 +930,7 @@ public:
         return view().find_last_not_of(ch, pos);
     }
 
-    constexpr size_type find_last_not_of(const char_type* s, size_type pos, size_type count) const noexcept {
+    constexpr size_type find_last_not_of(const char_type* s, size_type pos, size_type count) const {
         return view().find_last_not_of(s, pos, count);
     }
 

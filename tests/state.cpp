@@ -1,4 +1,4 @@
-// Internal COW-state transition tests, extracted from the old src/main.cpp demo.
+// Internal COW-state transition tests
 #define COW_STRING_TEST_STATUS
 #include "cowstring.hpp"
 

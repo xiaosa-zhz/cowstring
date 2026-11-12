@@ -506,14 +506,14 @@ private:
     char_type* exclusive_data() { return reserve_or_exclusive_shrink(size()); }
 
     // at(index) throw when index pass the end.
-    void check_index(size_type index) const {
+    constexpr void check_index(size_type index) const {
         if (index >= size()) {
             throw std::out_of_range("basic_cow_string: out of range");
         }
     }
 
     // insert/erase/replace allow pass-the-end position
-    void check_pos(size_type index) const {
+    constexpr void check_pos(size_type index) const {
         if (index > size()) {
             throw std::out_of_range("basic_cow_string: out of range");
         }

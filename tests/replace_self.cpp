@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
+#include <print>
 #include <random>
 #include <ranges>
 #include <string>
@@ -59,11 +59,11 @@ std::basic_string<CharT> model(const std::basic_string<CharT>& old, std::size_t 
 
 template<typename CharT>
 void print_sequence(const char* label, const std::basic_string<CharT>& s) {
-    std::fprintf(stderr, "      %s:", label);
+    std::print(stderr, "      {}:", label);
     for (CharT ch : s) {
-        std::fprintf(stderr, " %lx", static_cast<unsigned long>(ch));
+        std::print(stderr, " {:x}", static_cast<unsigned long>(ch));
     }
-    std::fputc('\n', stderr);
+    std::print(stderr, "\n");
 }
 
 struct results {
@@ -127,9 +127,9 @@ void check_case(results& result, const std::basic_string<CharT>& old, std::size_
     if (got != want || s.c_str()[s.size()] != CharT()) {
         ++result.failures;
         if (result.failures <= 10) {
-            std::fprintf(stderr,
-                "FAIL type-size=%zu pos=%zu count=%zu src=[%zu,%zu) cap=%zu "
-                "shrink=%d shared=%d mode=%s\n",
+            std::println(stderr,
+                "FAIL type-size={} pos={} count={} src=[{},{}) cap={} "
+                "shrink={} shared={} mode={}",
                 old.size(), pos, count, source_pos, source_pos + source_len, cap,
                 int(shrink), int(shared), mode_name(mode));
             print_sequence("old ", old);
@@ -221,11 +221,11 @@ void check_external(results& result, const std::basic_string<CharT>& old,
     if (got != want || s.c_str()[s.size()] != CharT()) {
         ++result.failures;
         if (result.failures <= 10) {
-            std::fprintf(stderr,
-                "FAIL external old-size=%zu pos=%zu count=%zu source-size=%zu "
-                "cap=%zu shrink=%d pointer=%d\n",
+            std::println(stderr,
+                "FAIL external old-size={} pos={} count={} source-size={} "
+                "cap={} shrink={} pointer={}",
                 old.size(), pos, count, source.size(), s.capacity(),
-                int(shrink), int(pointer_source));
+                shrink, pointer_source);
             print_sequence("old   ", old);
             print_sequence("source", source);
             print_sequence("got   ", got);
@@ -300,8 +300,8 @@ results run_suite(const char* name, std::size_t exhaustive_n,
     run_selected<CharT>(result);
     run_external<CharT>(result);
     run_random<CharT>(result, random_iterations, seed);
-    std::printf("[replace_self] %-8s cases=%zu failures=%zu\n",
-                name, result.cases, result.failures);
+    std::println("[replace_self] {:<8} cases={} failures={}",
+                 name, result.cases, result.failures);
     return result;
 }
 
@@ -321,10 +321,10 @@ int main() {
     add(run_suite<char32_t>("char32_t", 5, 5000, 0x5eed'0005));
 
     if (total.failures != 0) {
-        std::printf("[replace_self] FAILED: cases=%zu failures=%zu\n",
-                    total.cases, total.failures);
+        std::println("[replace_self] FAILED: cases={} failures={}",
+                     total.cases, total.failures);
         return 1;
     }
-    std::printf("[replace_self] PASS: cases=%zu\n", total.cases);
+    std::println("[replace_self] PASS: cases={}", total.cases);
     return 0;
 }

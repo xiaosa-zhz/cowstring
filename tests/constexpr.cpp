@@ -6,8 +6,8 @@
 
 #include <array>
 #include <cstddef>
-#include <cstdio>
 #include <iterator>
+#include <print>
 #include <ranges>
 #include <string_view>
 
@@ -295,6 +295,6 @@ consteval bool test_char_types() {
 static_assert(test_char_types());
 
 int main() {
-    std::puts("[constexpr] PASS");
+    std::println("[constexpr] PASS");
     return 0;
 }

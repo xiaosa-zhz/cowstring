@@ -8,8 +8,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <initializer_list>
+#include <print>
 #include <random>
 #include <ranges>
 #include <stdexcept>
@@ -35,17 +35,17 @@ results R;
 std::string g_context;
 
 void print_bytes(const char* label, SV s) {
-    std::fprintf(stderr, "      %s:", label);
+    std::print(stderr, "      {}:", label);
     for (unsigned char ch : s) {
-        std::fprintf(stderr, " %02x", unsigned(ch));
+        std::print(stderr, " {:02x}", unsigned(ch));
     }
-    std::fputc('\n', stderr);
+    std::print(stderr, "\n");
 }
 
 void report_failure(const char* what) {
     ++R.failures;
     if (R.failures <= 20) {
-        std::fprintf(stderr, "FAIL [%s] %s\n", g_context.c_str(), what);
+        std::println(stderr, "FAIL [{}] {}", g_context, what);
     }
 }
 
@@ -57,7 +57,7 @@ void check_same(const C& c, const S& s, const char* what) {
     if (!same) {
         report_failure(what);
         if (R.failures <= 20) {
-            std::fprintf(stderr, "      cow size=%zu std size=%zu\n",
+            std::println(stderr, "      cow size={} std size={}",
                          c.size(), s.size());
             print_bytes("cow", c.view());
             print_bytes("std", s);
@@ -70,7 +70,7 @@ void check_size(std::size_t got, std::size_t want, const char* what) {
     if (got != want) {
         report_failure(what);
         if (R.failures <= 20) {
-            std::fprintf(stderr, "      got=%zu want=%zu\n", got, want);
+            std::println(stderr, "      got={} want={}", got, want);
         }
     }
 }
@@ -80,7 +80,7 @@ void check_bool(bool got, bool want, const char* what) {
     if (got != want) {
         report_failure(what);
         if (R.failures <= 20) {
-            std::fprintf(stderr, "      got=%d want=%d\n", int(got), int(want));
+            std::println(stderr, "      got={} want={}", got, want);
         }
     }
 }
@@ -947,10 +947,10 @@ int main() {
     test_random();
 
     if (R.failures != 0) {
-        std::printf("[conformance] FAILED: cases=%zu failures=%zu\n",
-                    R.cases, R.failures);
+        std::println("[conformance] FAILED: cases={} failures={}",
+                     R.cases, R.failures);
         return 1;
     }
-    std::printf("[conformance] PASS: cases=%zu\n", R.cases);
+    std::println("[conformance] PASS: cases={}", R.cases);
     return 0;
 }

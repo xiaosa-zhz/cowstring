@@ -1,6 +1,6 @@
 #pragma once
-#ifndef MYLIB_COW_STRING_H
-#define MYLIB_COW_STRING_H 1
+#ifndef COPY_ON_WRITE_STRING_H
+#define COPY_ON_WRITE_STRING_H 1
 
 #include <cstddef>
 #include <concepts>
@@ -1816,4 +1816,4 @@ struct hash<cow::basic_cow_string<CharT, Allocator>> {
 
 } // namespace std
 
-#endif // MYLIB_COW_STRING_H
+#endif // COPY_ON_WRITE_STRING_H

@@ -1215,6 +1215,13 @@ public:
         return *this;
     }
 
+    template<std::convertible_to<string_view_type> StringViewLike>
+        requires (!std::convertible_to<const StringViewLike&, const char_type*>)
+    constexpr basic_cow_string& assign(const StringViewLike& sv,
+                                       size_type pos, size_type count = npos) {
+        return assign(string_view_type(sv).substr(pos, count));
+    }
+
     template<details::container_compatible_range<char_type> R>
     constexpr basic_cow_string& assign_range(R&& r) {
         return assign(std::ranges::begin(r), std::ranges::end(r));

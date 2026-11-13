@@ -828,7 +828,6 @@ public:
 #endif // COW_STRING_TEST_STATUS
 
     // Check if writing ops would require sso-filling/allocation first
-    [[gnu::always_inline]]
     constexpr bool exclusive() const noexcept
         post (r : r || status().shared)
     {

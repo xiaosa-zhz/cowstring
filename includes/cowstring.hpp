@@ -503,7 +503,7 @@ private:
         }
     }
 
-    char_type* exclusive_data() { return reserve_or_exclusive_shrink(size()); }
+    char_type* exclusive_data() post(exclusive()) { return reserve_or_exclusive_shrink(size()); }
 
     // at(index) throw when index pass the end.
     constexpr void check_index(size_type index) const {
@@ -828,12 +828,15 @@ public:
 #endif // COW_STRING_TEST_STATUS
 
     // Check if writing ops would require sso-filling/allocation first
-    constexpr bool exclusive() const noexcept {
+    [[gnu::always_inline]]
+    constexpr bool exclusive() const noexcept
+        post (r : r || status().shared)
+    {
         const auto s = status();
-        if (s == details::small) {
+        if (s == details::small || s == details::owned) {
             return true;
         }
-        if (s == details::shared || s == details::literal) {
+        if (s == details::literal) {
             return false;
         }
         if (ref_count().load(std::memory_order_acquire) == 1) {
@@ -1045,7 +1048,7 @@ public:
     // Modifying methods
 
     // Make a exclusive writable string if it not already is
-    void ensure_exclusive() { (void) exclusive_data(); }
+    void ensure_exclusive() post(exclusive()) { (void) exclusive_data(); }
 
     constexpr void swap(basic_cow_string& other) noexcept(always_equal_alloc || POCS) {
         if (this == &other) {

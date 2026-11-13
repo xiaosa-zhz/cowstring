@@ -1592,8 +1592,10 @@ public:
         if constexpr (std::contiguous_iterator<std::decay_t<Iter>>) {
             const size_type add_size = std::ranges::distance(iter, sent);
             const char_type* const src = std::to_address(iter);
-            if (!is_my_pointer(iter)) {
-                // The fast path for when iter is not alias with current string data
+            if (status() == details::literal || !is_my_pointer(iter)) {
+                // The fast path for when iter is not alias with current string data.
+                // If we are holding literal, source string will not be invalidated
+                // after exclusive allocation, and we are not aliasing after that.
                 const char_type* const src_end = src + add_size;
                 const size_type old_size = size();
                 const size_type rcount = std::ranges::min(count, old_size - pos);

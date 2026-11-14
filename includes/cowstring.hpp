@@ -632,6 +632,13 @@ private:
         }
     }
 
+    bool is_my_iter(const_iterator it) const noexcept {
+        static constexpr std::less_equal<void> le = {};
+        const auto ptr = std::to_address(it);
+        const auto v = view();
+        return le(v.data(), ptr) && le(ptr, v.data() + v.size());
+    }
+
     // Modification in-place only requires source range is valid,
     // so that it may have self-reference.
     template<std::contiguous_iterator It>
@@ -1513,7 +1520,7 @@ public:
     }
 
     iterator insert(const_iterator pos, size_type count, char_type ch)
-        pre (is_my_pointer(pos))
+        pre (is_my_iter(pos))
         post (exclusive())
     {
         const size_type index = pos - cbegin();
@@ -1522,7 +1529,7 @@ public:
     }
 
     iterator insert(const_iterator pos, char_type ch)
-        pre (is_my_pointer(pos))
+        pre (is_my_iter(pos))
         post (exclusive())
     {
         return insert(pos, 1, ch);
@@ -1531,7 +1538,7 @@ public:
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
     iterator insert(const_iterator pos, Iter&& iter, Sent&& sent)
-        pre (is_my_pointer(pos))
+        pre (is_my_iter(pos))
         post (exclusive())
     {
         const size_type index = pos - cbegin();
@@ -1540,7 +1547,7 @@ public:
     }
 
     iterator insert(const_iterator pos, std::initializer_list<char_type> il)
-        pre (is_my_pointer(pos))
+        pre (is_my_iter(pos))
         post (exclusive())
     {
         return insert(pos, il.begin(), il.end());
@@ -1548,7 +1555,7 @@ public:
 
     template<details::container_compatible_range<char_type> R>
     iterator insert_range(const_iterator pos, R&& r)
-        pre (is_my_pointer(pos))
+        pre (is_my_iter(pos))
         post (exclusive())
     {
         // Transfer iterator to index eagerly to avoid issues if r is the current object.
@@ -1564,7 +1571,7 @@ public:
     }
 
     iterator erase(const_iterator pos)
-        pre (is_my_pointer(pos))
+        pre (is_my_iter(pos))
         pre (pos != cend())
         post (exclusive())
     {
@@ -1574,7 +1581,7 @@ public:
     }
 
     iterator erase(const_iterator first, const_iterator last)
-        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
         post (exclusive())
     {
@@ -1598,7 +1605,7 @@ public:
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last, string_view_type str)
-        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
         post (exclusive())
     {
@@ -1652,7 +1659,7 @@ public:
     
     basic_cow_string& replace(const_iterator first, const_iterator last,
                               size_type count2, char_type ch)
-        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
         post (exclusive())
     {
@@ -1715,7 +1722,7 @@ public:
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
     basic_cow_string& replace(const_iterator first, const_iterator last, Iter&& iter, Sent&& sent)
-        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
         post (exclusive())
     {
@@ -1733,7 +1740,7 @@ public:
 
     basic_cow_string& replace(const_iterator first, const_iterator last,
                               std::initializer_list<char_type> il)
-        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
         post (exclusive())
     {
@@ -1749,7 +1756,7 @@ public:
 
     template<details::container_compatible_range<char_type> R>
     basic_cow_string& replace_with_range(const_iterator first, const_iterator last, R&& r)
-        pre (is_my_pointer(first) && is_my_pointer(last))
+        pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
         post (exclusive())
     {

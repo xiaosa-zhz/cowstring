@@ -13,6 +13,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <span>
 #include <memory>
 #include <atomic>
 #include <bit>
@@ -203,10 +204,25 @@ union storage {
         return reinterpret_cast<ctrl_blk<SizeT>*>(dyn.control << 2);
     }
 
+    std::span<CharT> allocation() const noexcept
+        pre (status().allocated)
+    {
+        auto* block = control();
+        return { block->template data<CharT>(), block->capacity };
+    }
+
     std::atomic_size_t& ref_count() const noexcept
         pre (status().allocated)
     {
         return control()->ref_count;
+    }
+
+    bool aliases_allocation(const CharT* ptr) const noexcept
+        pre (status().allocated)
+    {
+        static constexpr std::less_equal<void> le = {};
+        auto alloc = allocation();
+        return le(alloc.data(), ptr) && le(ptr, alloc.data() + alloc.size());
     }
 
     // There is no writable string during compile time
@@ -217,7 +233,9 @@ union storage {
         if (s == small) {
             return sso.data;
         } else {
-            return control()->template data<CharT>();
+            const CharT* data = dyn.data;
+            contract_assert(aliases_allocation(data));
+            return const_cast<CharT*>(data);
         }
     }
 
@@ -228,7 +246,12 @@ union storage {
         } else if (s == literal) {
             return sta.capacity;
         } else if !consteval {
-            return control()->capacity;
+            // Capacity of dynamic string is size plus space
+            // after current tail, which means for substring
+            // scenario prefix won't count. They can still
+            // be reused when actual recap happens.
+            auto alloc = allocation();
+            return static_cast<SizeT>((alloc.data() + alloc.size()) - dyn.data);
         }
         std::unreachable();
     }
@@ -378,6 +401,8 @@ private:
     static constexpr bool POCMA = allocator_traits_type::propagate_on_container_move_assignment::value;
     static constexpr bool POCS = allocator_traits_type::propagate_on_container_swap::value;
     static_assert(std::is_nothrow_swappable_v<allocator_type>
+        && std::is_nothrow_copy_constructible_v<allocator_type>
+        && std::is_nothrow_copy_assignable_v<allocator_type>
         && std::is_nothrow_move_constructible_v<allocator_type>
         && std::is_nothrow_move_assignable_v<allocator_type>);
 
@@ -398,9 +423,13 @@ private:
         }
     }
 
+    constexpr bool can_write_sso(size_type size) const noexcept {
+        return size <= storage.sso.capacity;
+    }
+
     constexpr char_type* write_sso(string_view_type view) noexcept
         pre (!status().allocated)
-        pre (view.size() <= storage.sso.capacity)
+        pre (can_write_sso(view.size()))
         post (status() == details::small)
     {
         std::start_lifetime(storage.sso);
@@ -416,7 +445,7 @@ private:
     // Copy content of view into SSO buffer, view is referencing current object.
     // Then release the old dynamic storage if needed.
     constexpr char_type* write_sso_release(string_view_type view) noexcept
-        pre (view.size() <= storage.sso.capacity)
+        pre (can_write_sso(view.size()))
         post (status() == details::small)
     {
         // Use a temporary buffer to move the content to SSO storage
@@ -426,6 +455,15 @@ private:
         std::ranges::copy_n(view.data(), size, buffer);
         deallocate_if_needed();
         return write_sso(string_view_type(buffer, size));
+    }
+
+    constexpr void assign_static_string(string_view_type view) noexcept
+        pre (!status().allocated)
+        post (status() == details::literal)
+    {
+        std::start_lifetime(storage.sta);
+        storage.sta.data = view.data();
+        storage.sta.size = view.size();
     }
 
     std::atomic_size_t& ref_count() const noexcept
@@ -452,29 +490,50 @@ private:
         }
     }
 
-    constexpr void set_states_on_copy(const basic_cow_string& other) noexcept
-        pre (!other.status().allocated || this->get_allocator() == other.get_allocator())
+    constexpr bool can_share_with(const basic_cow_string& other) const noexcept {
+        return !other.status().allocated || this->get_allocator() == other.get_allocator();
+    }
+
+    constexpr void set_states_on_copy(const basic_cow_string& other,
+                                      size_type pos = 0, size_type count = npos)
+        pre (can_share_with(other))
     {
-        if (other.status().allocated) {
-            // owned or shared string
-            // share with source
+        const auto s = other.status();
+        const string_view_type subview = other.subview(pos, count);
+        if (can_write_sso(subview.size())) {
+            write_sso(subview);
+        } else if (s.allocated) {
+            // Share with source
             other.storage.dyn.shared = 1;
             storage = other.storage;
+            storage.dyn.data = subview.data();
+            storage.dyn.size = subview.size();
             ref_count().fetch_add(1, std::memory_order_relaxed);
+        } else if (s.shared) {
+            assign_static_string(subview);
         } else {
-            storage = other.storage;
+            write_sso(subview);
         }
     }
 
-    constexpr void set_states_on_move(basic_cow_string&& other) noexcept {
-        if (other.status().allocated) {
-            // owned or shared string
-            // steal from source and set it to sso empty string
+    constexpr void set_states_on_move(basic_cow_string&& other,
+                                      size_type pos = 0, size_type count = npos)
+    {
+        const auto s = other.status();
+        const string_view_type subview = other.subview(pos, count);
+        if (can_write_sso(subview.size())) {
+            write_sso(subview);
+        } else if (s.allocated) {
+            // Steal from source and set it to sso empty string
             storage = other.storage;
+            storage.dyn.data = subview.data();
+            storage.dyn.size = subview.size();
             std::start_lifetime(other.storage.sso);
             other.storage.sso = {};
+        } else if (s.shared) {
+            assign_static_string(subview);
         } else {
-            storage = other.storage;
+            write_sso(subview);
         }
     }
 
@@ -714,11 +773,11 @@ public:
                                const allocator_type& alloc = allocator_type())
         : basic_cow_string(alloc)
     {
-        if (pos == 0 && count >= other.size() &&
-            (!other.status().allocated || this->get_allocator() == other.get_allocator())) {
-            set_states_on_copy(other);
+        const string_view_type view = other.subview(pos, count);
+        if (can_write_sso(view.size()) || can_share_with(other)) {
+            set_states_on_copy(other, pos, count);
         } else {
-            basic_cow_string(other.subview(pos, count), get_allocator()).swap(*this);
+            basic_cow_string(view, get_allocator()).swap(*this);
         }
     }
 
@@ -740,43 +799,11 @@ public:
                                const allocator_type& alloc = allocator_type())
         : basic_cow_string(alloc)
     {
-        other.check_pos(pos);
-        if consteval {
-            if (pos == 0 && count >= other.size()) {
-                set_states_on_move(std::move(other));
-            } else {
-                write_static_string(other.subview(pos, count));
-            }
+        const string_view_type view = other.subview(pos, count);
+        if (can_write_sso(view.size()) || can_share_with(other)) {
+            set_states_on_move(std::move(other), pos, count);
         } else {
-            const auto shrink_in_place = [this](size_type pos, size_type count) noexcept {
-                contract_assert(exclusive());
-                char_type* const data = storage.data();
-                const size_type original_size = size();
-                const size_type final_size = std::ranges::min(count, original_size - pos);
-                std::ranges::copy_n(data + pos, final_size, data);
-                resize(final_size);
-            };
-            if (other.status() == details::small) {
-                set_states_on_move(std::move(other));
-                shrink_in_place(pos, count);
-                return;
-            }
-            if (other.status() == details::literal && pos == 0 && count >= other.size()) {
-                set_states_on_move(std::move(other));
-                return;
-            }
-            if (this->get_allocator() == other.get_allocator()) {
-                if (pos == 0 && count >= other.size()) {
-                    set_states_on_move(std::move(other));
-                    return;
-                }
-                if (other.exclusive()) {
-                    set_states_on_move(std::move(other));
-                    shrink_in_place(pos, count);
-                    return;
-                }
-            }
-            basic_cow_string(other.subview(pos, count), get_allocator()).swap(*this);
+            basic_cow_string(view, get_allocator()).swap(*this);
         }
     }
 
@@ -860,7 +887,8 @@ public:
 
 #endif // COW_STRING_TEST_STATUS
 
-    // Check if writing ops would require sso-filling/allocation first
+    // Small buffer is exclusive, literal is not.
+    // Allocation need further checking for shared references.
     constexpr bool exclusive() const noexcept
         post (r : r || status().shared)
     {
@@ -1136,7 +1164,7 @@ public:
             deallocate_if_needed();
             static_cast<allocator_type&>(*this) = other.get_allocator();
             set_states_on_copy(other);
-        } else if (!other.status().allocated || this->get_allocator() == other.get_allocator()) {
+        } else if (can_share_with(other)) {
             deallocate_if_needed();
             set_states_on_copy(other);
         } else {
@@ -1165,7 +1193,7 @@ public:
             deallocate_if_needed();
             static_cast<allocator_type&>(*this) = static_cast<allocator_type&&>(other);
             set_states_on_move(std::move(other));
-        } else if (!other.status().allocated || this->get_allocator() == other.get_allocator()) {
+        } else if (can_share_with(other)) {
             deallocate_if_needed();
             set_states_on_move(std::move(other));
         } else {
@@ -1275,7 +1303,7 @@ public:
         // reserve_or_exclusive_shrink won't shrink
         // so we have to do it ourselves
         if (status().allocated) {
-            if (size() <= storage.sso.capacity) {
+            if (can_write_sso(size())) {
                 write_sso_release(view());
             } else if (!exclusive() || size() < capacity()) {
                 allocate_exclusive_buffer(view());

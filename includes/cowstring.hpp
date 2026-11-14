@@ -1,12 +1,14 @@
 #pragma once
 #ifndef COPY_ON_WRITE_STRING_H
-#define COPY_ON_WRITE_STRING_H 1
+#define COPY_ON_WRITE_STRING_H
 
 #include <cstddef>
+#include <cstdint>
 #include <concepts>
 #include <type_traits>
 #include <meta>
 #include <climits>
+#include <limits>
 #include <utility>
 #include <iterator>
 #include <string>
@@ -34,13 +36,70 @@ inline constexpr bool is_valid_char_type =
  || std::is_same_v<CharT, char16_t>
  || std::is_same_v<CharT, char32_t>;
 
+// shall never allocate through the allocator during constant evaluation
+template<typename CharT>
+struct allocation {
+    CharT* data = nullptr;
+    std::size_t capacity = 0;
+};
+
+template<typename SizeT>
+inline constexpr SizeT cow_max_size = std::numeric_limits<SizeT>::max() / 2;
+
+template<typename SizeT>
+struct alignas(4) ctrl_blk {
+    const SizeT capacity;
+    std::atomic_size_t ref_count;
+
+    template<typename CharT>
+    CharT* data() noexcept { return reinterpret_cast<CharT*>(this + 1); }
+};
+
+template<typename Alloc,
+         typename Traits = std::allocator_traits<Alloc>,
+         typename SizeT = Traits::size_type>
+ctrl_blk<SizeT>* allocate(const Alloc& source, SizeT capacity) {
+    using size_type = SizeT;
+    using header = ctrl_blk<size_type>;
+    using allocator = Traits::template rebind_alloc<header>;
+    using traits = std::allocator_traits<allocator>;
+    using value_type = Traits::value_type;
+    static constexpr std::size_t header_size = sizeof(header);
+    static constexpr std::size_t value_size = sizeof(value_type);
+    static_assert(std::is_same_v<size_type, typename traits::size_type>);
+    static_assert(header_size >= value_size && alignof(header) >= alignof(value_type));
+    allocator alloc(source);
+    if (capacity > cow_max_size<size_type>) {
+        throw std::length_error("basic_cow_string: capacity too large");
+    }
+    const std::size_t total_size = (value_size * (capacity + 1) + header_size - 1) / header_size + 1;
+    const std::size_t actual_capacity = (total_size - 1) * header_size / value_size - 1;
+    header* block = traits::allocate(alloc, total_size);
+    traits::construct(alloc, block, actual_capacity, 1);
+    return block;
+}
+
+template<typename Alloc,
+         typename Traits = std::allocator_traits<Alloc>,
+         typename SizeT = Traits::size_type>
+void deallocate(const Alloc& source, std::type_identity_t<ctrl_blk<SizeT>>* block) noexcept {
+    using header = ctrl_blk<typename Traits::size_type>;
+    using allocator = Traits::template rebind_alloc<header>;
+    using traits = std::allocator_traits<allocator>;
+    using value_type = Traits::value_type;
+    allocator alloc(source);
+    const std::size_t total_size = (block->capacity + 1) * sizeof(value_type) / sizeof(header) + 1;
+    traits::destroy(alloc, block);
+    traits::deallocate(alloc, block, total_size);
+}
+
 template<typename CharT, typename SizeT>
 struct dyn_string {
-    CharT* data = nullptr;
+    const CharT* data = nullptr;
     SizeT size = 0;
-    SizeT capacity : (sizeof(SizeT) * CHAR_BIT - 2) = 0;
-    mutable SizeT shared : 1 = 0;
-    SizeT allocated : 1 = 1;
+    std::uintptr_t control : (sizeof(SizeT) * CHAR_BIT - 2) = 0;
+    mutable std::uintptr_t shared : 1 = 0;
+    std::uintptr_t allocated : 1 = 1;
 };
 
 template<typename CharT, typename SizeT>
@@ -60,7 +119,7 @@ struct sso_string {
     unsigned char size : (CHAR_BIT - 2) = 0;
     unsigned char shared : 1 = 0;
     unsigned char allocated : 1 = 0;
-    static constexpr std::size_t capacity = Size - 1;
+    static constexpr std::size_t capacity = Size - 1; // TODO
 };
 
 template<typename CharT, std::size_t Size>
@@ -70,7 +129,7 @@ struct sso_string<CharT, Size> {
     unsigned char size : (CHAR_BIT - 2) = 0;
     unsigned char shared : 1 = 0;
     unsigned char allocated : 1 = 0;
-    static constexpr std::size_t capacity = Size - 1;
+    static constexpr std::size_t capacity = Size - 1; // TODO
 };
 
 struct status {
@@ -116,26 +175,17 @@ union storage {
         }
     }
 
-    template<typename Self, typename OP>
-    constexpr auto visit(this Self& self, OP op) noexcept {
-        const auto s = self.status();
+    template<typename OP>
+    constexpr auto visit(OP op) const noexcept {
+        const auto s = status();
         if (s == small) {
-            return op(self.sso);
+            return op(sso);
         } else if (s == literal) {
-            if constexpr (std::is_const_v<Self>) {
-                return op(self.sta);
-            }
+            return op(sta);
         } else if !consteval {
-            return op(self.dyn);
+            return op(dyn);
         }
         std::unreachable();
-    }
-
-    // There is no writable string during compile time
-    CharT* data() noexcept
-        pre (!status().shared)
-    {
-        return visit([](auto& s) -> CharT* { return s.data; });
     }
 
     constexpr const CharT* data() const noexcept {
@@ -146,60 +196,48 @@ union storage {
         return visit([](const auto& s) -> SizeT { return s.size; });
     }
 
+    constexpr std::basic_string_view<CharT> view() const noexcept {
+        return visit([](const auto& s) -> std::basic_string_view<CharT> {
+            return { s.data, s.size };
+        });
+    }
+
+    ctrl_blk<SizeT>* control() const noexcept
+        pre (status().allocated)
+    {
+        return reinterpret_cast<ctrl_blk<SizeT>*>(dyn.control << 2);
+    }
+
+    std::atomic_size_t& ref_count() const noexcept
+        pre (status().allocated)
+    {
+        return control()->ref_count;
+    }
+
+    // There is no writable string during compile time
+    CharT* data() noexcept
+        pre (!status().shared)
+    {
+        const auto s = status();
+        if (s == small) {
+            return sso.data;
+        } else {
+            return control()->template data<CharT>();
+        }
+    }
+
     constexpr SizeT capacity() const noexcept {
-        return visit([](const auto& s) -> SizeT { return s.capacity; });
-    }
-
-    using string_view_type = std::basic_string_view<CharT>;
-
-    constexpr string_view_type view() const noexcept {
-        return visit([](const auto& s) -> string_view_type { return { s.data, s.size }; });
+        const auto s = status();
+        if (s == small) {
+            return sso.capacity;
+        } else if (s == literal) {
+            return sta.capacity;
+        } else if !consteval {
+            return control()->capacity;
+        }
+        std::unreachable();
     }
 };
-
-// shall never allocate through the allocator during constant evaluation
-template<typename CharT>
-struct allocation {
-    CharT* data = nullptr;
-    std::size_t capacity = 0;
-};
-
-template<typename SizeT>
-inline constexpr SizeT cow_max_size = SizeT(1) << (sizeof(SizeT) * CHAR_BIT - 2);
-
-template<typename Alloc, typename Traits = std::allocator_traits<Alloc>>
-allocation<typename Traits::value_type> allocate(const Alloc& source, std::size_t capacity) {
-    using allocator = Traits::template rebind_alloc<std::size_t>;
-    using traits = std::allocator_traits<allocator>;
-    using value_type = Traits::value_type;
-    using size_type = traits::size_type;
-    static_assert(sizeof(std::size_t) >= sizeof(value_type)
-               && alignof(std::size_t) >= alignof(value_type));
-    allocator alloc(source);
-    if (capacity > cow_max_size<size_type>) {
-        throw std::length_error("basic_cow_string: capacity too large");
-    }
-    const std::size_t total_size =
-        (sizeof(value_type) * (capacity + 1) + sizeof(std::size_t) - 1) / sizeof(std::size_t) + 1;
-    std::size_t* block = traits::allocate(alloc, total_size);
-    traits::construct(alloc, block, 1);
-    const std::size_t actual_capacity =
-        (total_size - 1) * sizeof(std::size_t) / sizeof(value_type) - 1;
-    return { reinterpret_cast<value_type*>(block + 1), actual_capacity };
-}
-
-template<typename Alloc, typename Traits = std::allocator_traits<Alloc>>
-void deallocate(const Alloc& source, allocation<typename Traits::value_type> mem) noexcept {
-    using allocator = Traits::template rebind_alloc<std::size_t>;
-    using traits = std::allocator_traits<allocator>;
-    using value_type = Traits::value_type;
-    allocator alloc(source);
-    std::size_t* block = reinterpret_cast<std::size_t*>(mem.data) - 1;
-    const std::size_t total_size =
-        (mem.capacity + 1) * sizeof(value_type) / sizeof(std::size_t) + 1;
-    traits::destroy(alloc, block);
-    traits::deallocate(alloc, block, total_size);
-}
 
 template<typename Iter, typename Sent, typename CharT>
 concept eligible_iter_and_sent = std::input_iterator<std::decay_t<Iter>>
@@ -210,6 +248,11 @@ template<typename R, typename CharT>
 concept container_compatible_range = std::ranges::input_range<R>
     && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
 
+// When a null-terminated string is required,
+// COW string need it to be a string literal
+// that is known at compile time.
+// User can still escape this requirement by
+// explicitly making a string_view.
 template<typename CharT>
 class literal_helper
 {
@@ -393,12 +436,10 @@ private:
         return write_sso(string_view_type(buffer, size));
     }
 
-    std::atomic_ref<std::size_t> ref_count() const noexcept
+    std::atomic_size_t& ref_count() const noexcept
         pre (status().allocated)
     {
-        return std::atomic_ref<std::size_t>(
-            *(reinterpret_cast<std::size_t*>(storage.dyn.data) - 1)
-        );
+        return storage.ref_count();
     }
 
     constexpr allocator_type allocator_copy() const noexcept(always_equal_alloc) {
@@ -451,7 +492,7 @@ private:
         const auto s = status();
         if (s.allocated) {
             if (!s.shared || ref_count().fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                details::deallocate(get_allocator(), { storage.dyn.data, storage.dyn.capacity });
+                details::deallocate(get_allocator(), storage.control());
             }
             std::start_lifetime(storage.sso);
             storage.sso = {};
@@ -462,12 +503,16 @@ private:
     char_type* allocate_exclusive_buffer(string_view_type str, std::size_t capacity) {
         const char_type* const str_data = str.data();
         const std::size_t size = std::ranges::min(str.size(), capacity);
-        auto [data, actual_capacity] = details::allocate(get_allocator(), capacity);
+        auto* const control = details::allocate(get_allocator(), capacity);
+        char_type* const data = control->template data<char_type>();
         std::ranges::copy_n(str_data, size, data);
         data[size] = char_type();
         deallocate_if_needed();
         std::start_lifetime(storage.dyn);
-        storage.dyn = { .data = data, .size = size, .capacity = actual_capacity };
+        storage.dyn = {
+            .data = data, .size = size,
+            .control = reinterpret_cast<std::uintptr_t>(control) >> 2
+        };
         return data;
     }
 
@@ -855,7 +900,6 @@ public:
     constexpr operator string_view_type() const noexcept { return view(); }
     constexpr basic_cow_string clone() const { return { view(), allocator_copy() }; }
     constexpr const_pointer data() const noexcept { return storage.data(); }
-    constexpr const_pointer c_str() const noexcept { return storage.data(); }
     constexpr const_iterator begin() const noexcept { return const_iterator(storage.data()); }
     constexpr const_iterator end() const noexcept { return const_iterator(storage.data() + size()); }
     constexpr const_iterator cbegin() const noexcept { return begin(); }

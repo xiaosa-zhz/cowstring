@@ -255,6 +255,18 @@ union storage {
         }
         std::unreachable();
     }
+
+    constexpr SizeT real_capacity() const noexcept {
+        const auto s = status();
+        if (s == small) {
+            return sso.capacity;
+        } else if (s == literal) {
+            return sta.capacity;
+        } else if !consteval {
+            return static_cast<SizeT>(allocation().size());
+        }
+        std::unreachable();
+    }
 };
 
 template<typename Iter, typename Sent, typename CharT>
@@ -577,19 +589,25 @@ private:
         // In this case, new buffer always have capacity of new_cap regardless of current capacity.
         // Tail contents are discarded if new_cap < size() here. (The 'exclusive shrink' branch)
         if (!exclusive()) {
-            if (new_cap > storage.sso.capacity) {
-                return allocate_exclusive_buffer(view(), new_cap);
-            } else {
+            if (can_write_sso(new_cap)) {
                 return write_sso_release(subview(0, new_cap));
+            } else {
+                return allocate_exclusive_buffer(view(), new_cap);
             }
         } else {
-            const size_type old_cap = capacity();
-            if (new_cap > old_cap) {
+            const size_type old_real_cap = storage.real_capacity();
+            if (new_cap > old_real_cap) {
                 // The auto growing branch
-                const size_type grow = std::saturating_mul(old_cap, growing_factor);
+                const size_type grow = std::saturating_mul(old_real_cap, growing_factor);
                 const size_type ceil_grow = std::ranges::min(grow, max_size());
                 const size_type final_cap = std::ranges::max(new_cap, ceil_grow);
                 return allocate_exclusive_buffer(view(), final_cap);
+            } else if (new_cap > capacity()) {
+                // Can use prefix to get enough capacity without reallocation.
+                const auto alloc = storage.allocation();
+                std::ranges::copy_n(storage.dyn.data, storage.dyn.size, alloc.data());
+                storage.dyn.data = alloc.data();
+                return alloc.data();
             } else {
                 // Already exclusive and having enough capacity
                 // Nothing to do here.
@@ -1304,6 +1322,7 @@ public:
         // so we have to do it ourselves
         if (status().allocated) {
             if (can_write_sso(size())) {
+                // TODO: Can we really reach here? Test later.
                 write_sso_release(view());
             } else if (!exclusive() || size() < capacity()) {
                 allocate_exclusive_buffer(view());

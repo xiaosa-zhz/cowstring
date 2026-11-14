@@ -36,15 +36,8 @@ inline constexpr bool is_valid_char_type =
  || std::is_same_v<CharT, char16_t>
  || std::is_same_v<CharT, char32_t>;
 
-// shall never allocate through the allocator during constant evaluation
-template<typename CharT>
-struct allocation {
-    CharT* data = nullptr;
-    std::size_t capacity = 0;
-};
-
-template<typename SizeT>
-inline constexpr SizeT cow_max_size = std::numeric_limits<SizeT>::max() / 2;
+template<typename SizeT, typename CharT>
+inline constexpr SizeT cow_max_size = std::numeric_limits<SizeT>::max() / (sizeof(CharT) * 2);
 
 template<typename SizeT>
 struct alignas(4) ctrl_blk {
@@ -58,7 +51,7 @@ struct alignas(4) ctrl_blk {
 template<typename Alloc,
          typename Traits = std::allocator_traits<Alloc>,
          typename SizeT = Traits::size_type>
-ctrl_blk<SizeT>* allocate(const Alloc& source, SizeT capacity) {
+ctrl_blk<SizeT>* allocate(const Alloc& source, std::type_identity_t<SizeT> capacity) {
     using size_type = SizeT;
     using header = ctrl_blk<size_type>;
     using allocator = Traits::template rebind_alloc<header>;
@@ -69,11 +62,11 @@ ctrl_blk<SizeT>* allocate(const Alloc& source, SizeT capacity) {
     static_assert(std::is_same_v<size_type, typename traits::size_type>);
     static_assert(header_size >= value_size && alignof(header) >= alignof(value_type));
     allocator alloc(source);
-    if (capacity > cow_max_size<size_type>) {
+    if (capacity > cow_max_size<size_type, value_type>) {
         throw std::length_error("basic_cow_string: capacity too large");
     }
-    const std::size_t total_size = (value_size * (capacity + 1) + header_size - 1) / header_size + 1;
-    const std::size_t actual_capacity = (total_size - 1) * header_size / value_size - 1;
+    const std::size_t total_size = (value_size * capacity + header_size - 1) / header_size + 1;
+    const std::size_t actual_capacity = (total_size - 1) * header_size / value_size;
     header* block = traits::allocate(alloc, total_size);
     traits::construct(alloc, block, actual_capacity, 1);
     return block;
@@ -83,12 +76,14 @@ template<typename Alloc,
          typename Traits = std::allocator_traits<Alloc>,
          typename SizeT = Traits::size_type>
 void deallocate(const Alloc& source, std::type_identity_t<ctrl_blk<SizeT>>* block) noexcept {
-    using header = ctrl_blk<typename Traits::size_type>;
+    using header = ctrl_blk<SizeT>;
     using allocator = Traits::template rebind_alloc<header>;
     using traits = std::allocator_traits<allocator>;
     using value_type = Traits::value_type;
+    static constexpr std::size_t header_size = sizeof(header);
+    static constexpr std::size_t value_size = sizeof(value_type);
     allocator alloc(source);
-    const std::size_t total_size = (block->capacity + 1) * sizeof(value_type) / sizeof(header) + 1;
+    const std::size_t total_size = (value_size * block->capacity + header_size - 1) / header_size + 1;
     traits::destroy(alloc, block);
     traits::deallocate(alloc, block, total_size);
 }
@@ -119,7 +114,7 @@ struct sso_string {
     unsigned char size : (CHAR_BIT - 2) = 0;
     unsigned char shared : 1 = 0;
     unsigned char allocated : 1 = 0;
-    static constexpr std::size_t capacity = Size - 1; // TODO
+    static constexpr std::size_t capacity = Size;
 };
 
 template<typename CharT, std::size_t Size>
@@ -129,7 +124,7 @@ struct sso_string<CharT, Size> {
     unsigned char size : (CHAR_BIT - 2) = 0;
     unsigned char shared : 1 = 0;
     unsigned char allocated : 1 = 0;
-    static constexpr std::size_t capacity = Size - 1; // TODO
+    static constexpr std::size_t capacity = Size;
 };
 
 struct status {
@@ -248,11 +243,9 @@ template<typename R, typename CharT>
 concept container_compatible_range = std::ranges::input_range<R>
     && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
 
-// When a null-terminated string is required,
-// COW string need it to be a string literal
-// that is known at compile time.
-// User can still escape this requirement by
-// explicitly making a string_view.
+// In std::string, some interfaces take null-terminated string
+// as argument. This facility only accepts string literals
+// known at compile time for corresponding APIs.
 template<typename CharT>
 class literal_helper
 {
@@ -416,7 +409,6 @@ private:
         if (!view.empty()) {
             std::ranges::copy_n(view.data(), view.size(), data);
         }
-        data[view.size()] = char_type();
         storage.sso.size = static_cast<unsigned char>(view.size());
         return storage.sso.data;
     }
@@ -506,7 +498,6 @@ private:
         auto* const control = details::allocate(get_allocator(), capacity);
         char_type* const data = control->template data<char_type>();
         std::ranges::copy_n(str_data, size, data);
-        data[size] = char_type();
         deallocate_if_needed();
         std::start_lifetime(storage.dyn);
         storage.dyn = {
@@ -613,10 +604,7 @@ private:
             return true;
         }
         if (new_size < old_size) {
-            // Move the source and tail before shrinking.
-            // resize() writes a null terminator at the new end,
-            // which used to clobber data that was still needed
-            // by the tail move.
+            // Just move source and tail then shrink.
             details::strmov(src, src_end, dst);
             details::strmov(dst_end, old_end, tail);
             resize(new_size);
@@ -890,7 +878,7 @@ public:
         return false;
     }
 
-    static constexpr size_type max_size() noexcept { return details::cow_max_size<size_type>; }
+    static constexpr size_type max_size() noexcept { return details::cow_max_size<size_type, char_type>; }
     constexpr size_type size() const noexcept { return storage.size(); }
     constexpr size_type capacity() const noexcept { return storage.capacity(); }
     constexpr size_type length() const noexcept { return size(); }
@@ -1338,7 +1326,6 @@ public:
         } else {
             storage.sso.size = r;
         }
-        p[r] = char_type();
     }
 
     void resize(size_type new_size, char_type ch = char_type())

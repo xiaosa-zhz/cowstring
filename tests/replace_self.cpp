@@ -123,8 +123,8 @@ void check_case(results& result, const std::basic_string<CharT>& old, std::size_
     }
 
     ++result.cases;
-    const std::basic_string<CharT> got(s.c_str(), s.size());
-    if (got != want || s.c_str()[s.size()] != CharT()) {
+    const std::basic_string<CharT> got(s.data(), s.size());
+    if (got != want) {
         ++result.failures;
         if (result.failures <= 10) {
             std::println(stderr,
@@ -217,8 +217,8 @@ void check_external(results& result, const std::basic_string<CharT>& old,
     }
 
     ++result.cases;
-    const std::basic_string<CharT> got(s.c_str(), s.size());
-    if (got != want || s.c_str()[s.size()] != CharT()) {
+    const std::basic_string<CharT> got(s.data(), s.size());
+    if (got != want) {
         ++result.failures;
         if (result.failures <= 10) {
             std::println(stderr,

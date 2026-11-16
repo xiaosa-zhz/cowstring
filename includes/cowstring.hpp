@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <span>
+#include <inplace_vector>
 #include <memory>
 #include <atomic>
 #include <bit>
@@ -22,7 +23,6 @@
 #include <ranges>
 #include <functional>
 #include <numeric>
-#include <cstring>
 #include <stdexcept>
 
 namespace cow {
@@ -155,6 +155,7 @@ union storage {
     sso_type sso;
 
     static_assert(sizeof(dyn) == sizeof(sta) && sizeof(dyn) == sizeof(sso));
+    static_assert(sizeof(SizeT) >= sizeof(void*));
 
     constexpr details::status status() const noexcept {
         if consteval {
@@ -217,10 +218,15 @@ union storage {
         return control()->ref_count;
     }
 
-    bool aliases_allocation(const CharT* ptr) const noexcept
-        pre (status().allocated)
-    {
+    bool self_alias(const CharT* ptr) const noexcept {
         static constexpr std::less_equal<void> le = {};
+        const auto s = status();
+        if (s == literal) {
+            return false;
+        }
+        if (s == small) {
+            return le(sso.data, ptr) && le(ptr, sso.data + sso.size);
+        }
         auto alloc = allocation();
         return le(alloc.data(), ptr) && le(ptr, alloc.data() + alloc.size());
     }
@@ -233,9 +239,7 @@ union storage {
         if (s == small) {
             return sso.data;
         } else {
-            const CharT* data = dyn.data;
-            contract_assert(aliases_allocation(data));
-            return const_cast<CharT*>(data);
+            return const_cast<CharT*>(dyn.data);
         }
     }
 
@@ -344,11 +348,6 @@ public:
 private:
     pointer cur = nullptr;
 };
-
-template<typename CharT>
-void strmov(const CharT* src, const CharT* src_end, CharT* dst) noexcept {
-    std::memmove(dst, src, (src_end - src) * sizeof(CharT));
-}
 
 template<typename S>
 concept string_like = requires(const S& s) {
@@ -639,84 +638,51 @@ private:
         return le(v.data(), ptr) && le(ptr, v.data() + v.size());
     }
 
-    // Modification in-place only requires source range is valid,
-    // so that it may have self-reference.
-    template<std::contiguous_iterator It>
-    bool is_my_pointer(const It& it) const noexcept {
-        static constexpr std::less_equal<void> le = {};
-        const auto ptr = std::to_address(it);
-        const auto v = view();
-        const bool within = le(v.data(), ptr) && le(ptr, v.data() + v.size());
-        if (within) {
-            // Check if some devil break strict aliasing rules.
-            contract_assert(std::is_convertible_v<decltype(ptr), const char_type*>);
-        }
-        return within;
-    }
-
-    bool inplace_self_replace(size_type pos, size_type count,
-                              const char_type* const src,
-                              const size_type srclen) noexcept
+    void adjust_old_for_replace(size_type pos, size_type count, size_type add_size)
         pre (pos <= size())
-        pre (src != nullptr)
-        post (r : !r || exclusive())
+        post (exclusive())
     {
-        if (!exclusive()) {
-            return false;
-        }
-        // Some non-owning users are aliasing us, but we can
-        // try to do modification in-place if possible.
-        // They are invalidated anyway.
         const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
-        const size_type new_size = old_size - rcount + srclen;
-        const size_type cap = capacity();
-        if (new_size > cap) {
-            return false;
+        const size_type new_size = old_size - rcount + add_size;
+        const auto allocate_for_replace = [&, this] {
+            auto* const control = details::allocate(get_allocator(), new_size);
+            char_type* const data = control->template data<char_type>();
+            // Copy head and tail of original string, and leave a hole for new content
+            const char_type* const old_data = std::as_const(*this).data();
+            std::ranges::copy_n(old_data, pos, data);
+            std::ranges::copy_n(old_data + pos + rcount, old_size - pos - rcount, data + pos + add_size);
+            deallocate_if_needed();
+            std::start_lifetime(storage.dyn);
+            storage.dyn = {
+                .data = data, .size = new_size,
+                .control = reinterpret_cast<std::uintptr_t>(control) >> 2
+            };
+        };
+        if (!exclusive()) {
+            allocate_for_replace();
+        } else if (new_size <= capacity()) {
+            // If tail capacity is enough, move tail only
+            char_type* const data = storage.data();
+            std::ranges::copy_n(data + pos + rcount, old_size - pos - rcount, data + pos + add_size);
+            if (status().allocated) {
+                storage.dyn.size = new_size;
+            } else {
+                storage.sso.size = static_cast<unsigned char>(new_size);
+            }
+        } else if (new_size <= storage.real_capacity()) {
+            // If real capacity is enough, move head and tail to front
+            contract_assert(status() == details::owned);
+            const char_type* const data = storage.data();
+            std::span<char_type> alloc = storage.allocation();
+            std::ranges::copy_n(data, pos, alloc.data());
+            std::ranges::copy_n(data + pos + rcount, old_size - pos - rcount, alloc.data() + pos + add_size);
+            storage.dyn.data = alloc.data();
+            storage.dyn.size = new_size;
+        } else {
+            // Need reallocation
+            allocate_for_replace();
         }
-        // Capacity is enough, so no reallocation happens and
-        // the source range stays valid during the operation.
-        char_type* const data = storage.data();
-        char_type* const old_end = data + old_size;
-        char_type* const new_end = data + new_size;
-        const char_type* const src_end = src + srclen;
-        char_type* const dst = data + pos;
-        char_type* const dst_end = dst + rcount;
-        char_type* const tail = new_end - (old_end - dst_end);
-        if (new_size == old_size) {
-            details::strmov(src, src_end, dst);
-            return true;
-        }
-        if (new_size < old_size) {
-            // Just move source and tail then shrink.
-            details::strmov(src, src_end, dst);
-            details::strmov(dst_end, old_end, tail);
-            resize(new_size);
-            return true;
-        }
-        // Growing
-        resize(new_size);
-        if (src <= dst) {
-            // Source lies before (or at) the destination,
-            // so moving the tail cannot clobber it.
-            details::strmov(dst_end, old_end, tail);
-            details::strmov(src, src_end, dst);
-            return true;
-        }
-        // Source starts right of the destination.
-        // The part before the old tail is copied in place,
-        // the rest is relocated with the tail and then
-        // copied from its new location.
-        const difference_type prefix = std::ranges::max(dst_end - src, 0z);
-        if (prefix != 0) {
-            details::strmov(src, dst_end, dst);
-        }
-        details::strmov(dst_end, old_end, tail);
-        const char_type* const moved =
-            (src < dst_end ? dst_end : src) + srclen - rcount;
-        details::strmov(moved, moved + (srclen - prefix),
-                        dst + prefix);
-        return true;
     }
 
 public:
@@ -1636,24 +1602,8 @@ public:
         const size_type rcount = std::ranges::min(count, old_size - pos);
         const size_type add_size = count2;
         const size_type new_size = old_size - rcount + add_size;
-        if (new_size == old_size) {
-            char_type* const data = exclusive_data();
-            std::ranges::fill_n(data + pos, add_size, ch);
-        } else if (new_size > old_size) {
-            resize(new_size);
-            char_type* const data = storage.data();
-            details::strmov(data + pos + rcount, data + old_size,
-                            data + pos + add_size);
-            std::ranges::fill_n(data + pos, add_size, ch);
-        } else {
-            char_type* const data = exclusive_data();
-            std::ranges::fill_n(data + pos, add_size, ch);
-            if (add_size != rcount) {
-                details::strmov(data + pos + rcount, data + old_size,
-                                data + pos + add_size);
-            }
-            resize(new_size);
-        }
+        adjust_old_for_replace(pos, count, add_size);
+        std::ranges::fill_n(storage.data() + pos, add_size, ch);
         return *this;
     }
     
@@ -1677,46 +1627,24 @@ public:
         if constexpr (std::contiguous_iterator<std::decay_t<Iter>>) {
             const size_type add_size = std::ranges::distance(iter, sent);
             const char_type* const src = std::to_address(iter);
-            if (status() == details::literal || !is_my_pointer(iter)) {
-                // The fast path for when iter is not alias with current string data.
-                // If we are holding literal, source string will not be invalidated
-                // after exclusive allocation, and we are not aliasing after that.
-                const char_type* const src_end = src + add_size;
-                const size_type old_size = size();
-                const size_type rcount = std::ranges::min(count, old_size - pos);
-                const size_type new_size = old_size - rcount + add_size;
-                if (new_size == old_size) {
-                    char_type* const data = exclusive_data();
-                    details::strmov(src, src_end, data + pos);
-                } else if (new_size > old_size) {
-                    resize(new_size);
-                    char_type* const data = storage.data();
-                    details::strmov(data + pos + rcount, data + old_size,
-                                    data + pos + add_size);
-                    details::strmov(src, src_end, data + pos);
-                } else {
-                    char_type* const data = exclusive_data();
-                    details::strmov(src, src_end, data + pos);
-                    if (add_size != rcount) {
-                        details::strmov(data + pos + rcount, data + old_size,
-                                        data + pos + add_size);
-                    }
-                    resize(new_size);
-                }
+            if (!storage.self_alias(src)) {
+                adjust_old_for_replace(pos, count, add_size);
+                std::ranges::copy_n(src, add_size, storage.data() + pos);
                 return *this;
             }
-            if (inplace_self_replace(pos, count, src, add_size)) {
-                return *this;
-            }
-            // Fallback, but we already know length
-            string_type cp(src, add_size, get_allocator());
-            return replace(pos, count, cp);
-        } else {
-            // Fallback
-            std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
-            string_type cp(std::from_range, std::move(r), get_allocator());
-            return replace(pos, count, cp);
         }
+        static constexpr std::size_t inplace_buffer_size = 1024 / sizeof(char_type);
+        if constexpr (std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
+            const size_type add_size = std::ranges::distance(iter, sent);
+            if (add_size <= inplace_buffer_size) {
+                auto r = std::ranges::subrange(std::forward<Iter>(iter), std::forward<Sent>(sent));
+                std::inplace_vector<char_type, inplace_buffer_size> cp(std::from_range, std::move(r));
+                return replace(pos, count, string_view_type(cp));
+            }
+        }
+        std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
+        string_type cp(std::from_range, std::move(r), get_allocator());
+        return replace(pos, count, cp);
     }
 
     template<typename Iter, typename Sent>
@@ -1751,6 +1679,7 @@ public:
     basic_cow_string& replace_with_range(size_type pos, size_type count, R&& r)
         post (exclusive())
     {
+        // TODO: Add approximately_sized_range support
         return replace(pos, count, std::ranges::begin(r), std::ranges::end(r));
     }
 

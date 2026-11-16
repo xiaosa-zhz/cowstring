@@ -473,8 +473,7 @@ private:
         post (status() == details::literal)
     {
         std::start_lifetime(storage.sta);
-        storage.sta.data = view.data();
-        storage.sta.size = view.size();
+        storage.sta = { .data = view.data(), .size = view.size() };
     }
 
     std::atomic_size_t& ref_count() const noexcept
@@ -1598,12 +1597,9 @@ public:
         post (exclusive())
     {
         check_pos(pos);
-        const size_type old_size = size();
-        const size_type rcount = std::ranges::min(count, old_size - pos);
-        const size_type add_size = count2;
-        const size_type new_size = old_size - rcount + add_size;
-        adjust_old_for_replace(pos, count, add_size);
-        std::ranges::fill_n(storage.data() + pos, add_size, ch);
+        // The size bookkeeping happens inside adjust_old_for_replace.
+        adjust_old_for_replace(pos, count, count2);
+        std::ranges::fill_n(storage.data() + pos, count2, ch);
         return *this;
     }
     
@@ -1692,7 +1688,7 @@ public:
         // Transfer iterators to index eagerly to avoid issues if r is the current object.
         const size_type index = first - cbegin();
         const size_type count = last - first;
-        return replace(index, count, std::ranges::begin(r), std::ranges::end(r));
+        return replace(index, count, std::forward<R>(r));
     }
 
 private:

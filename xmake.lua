@@ -48,6 +48,7 @@ toolchain("gcc-trunk")
     end)
 
 local function add_exp_feature_flags()
+    add_cxxflags("-Wall")
     add_cxxflags("-freflection", {force = true})
     add_cxxflags("-fcontracts", {force = true})
     add_cxxflags("-fcontract-evaluation-semantic=enforce", {force = true})

@@ -73,18 +73,28 @@ int main() {
     check(str == after_long, "long replace content");
     check(str.substr(0, 14) == "Hello, World! ", "substr content");
 
+    // A short literal is copied into the SSO buffer rather than left bound to
+    // static storage: SSO is writable, so assignment and copying materialize
+    // the characters instead of aliasing the literal.
     constexpr const char* goodbye = "Goodbye!";
     str2 = goodbye;
-    check(str2.is_literal(), "assignment from constexpr pointer is literal");
-    check(!str2.is_owned(), "literal is not owned");
-    check(str2 == "Goodbye!", "literal assignment content");
+    check(str2.is_small(), "assignment from constexpr pointer uses SSO");
+    check(!str2.is_owned(), "SSO assignment is not owned");
+    check(str2 == "Goodbye!", "SSO assignment content");
 
     cow::cow_string str3 = str2;
-    check(str3.is_literal(), "literal copy stays literal");
+    check(str3.is_small(), "SSO copy stays SSO");
     str3.shrink_to_fit();
-    check(str3.is_literal(), "shrink_to_fit keeps literal state");
-    check(!str3.is_small(), "literal is not small");
-    check(str3 == "Goodbye!", "literal copy content");
+    check(str3.is_small(), "shrink_to_fit keeps SSO state");
+    check(!str3.is_literal(), "SSO copy is not literal");
+    check(str3 == "Goodbye!", "SSO copy content");
+
+    // Only literals longer than the SSO buffer keep pointing at static storage.
+    cow::cow_string long_literal = "Hello, World! I am a COW"_cows;
+    check(long_literal.is_literal(), "long literal binds static storage");
+    cow::cow_string long_copy = long_literal;
+    check(long_copy.is_literal(), "copy of long literal binds static storage");
+    check(!long_copy.is_small(), "long literal copy is not SSO");
 
     cow::cow_string cloned = str.clone();
     check(cloned == str, "clone content");
@@ -99,10 +109,11 @@ int main() {
     check(small == "abc", "pointer+count content");
 
     const cow::cow_string literal = "literal";
-    check(literal.is_literal(), "literal constructor status");
+    check(literal.is_literal(), "short literal constructor binds static storage");
+    // Copying it materializes into SSO, since the text fits the SSO buffer.
     const cow::cow_string literal_copy = literal;
-    check(literal_copy.is_literal(), "literal copy constructor status");
-    check(literal_copy.cur_count() == 0, "literal has no refcount");
+    check(literal_copy.is_small(), "copy of short literal uses SSO");
+    check(literal_copy.cur_count() == 0, "SSO copy has no refcount");
 
     check(sizeof(cow::cow_string) == sizeof(cow::cow_wstring),
           "char/wchar size");

@@ -6,8 +6,13 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <utility>
 
+// Exposes the cow status queries (is_shared()/cur_count()) used below to assert
+// that the cross-sharing cases really share one allocation.
+#define COW_STRING_TEST_STATUS
 #include "cowstring.hpp"
+#undef COW_STRING_TEST_STATUS
 
 namespace {
 
@@ -145,7 +150,7 @@ void run_exhaustive(results& result, std::size_t max_n) {
     for (std::size_t n = 0; n <= max_n; ++n) {
         const std::basic_string<CharT> old = make_old<CharT>(n);
         for (std::size_t pos = 0; pos <= n; ++pos) {
-            for (std::size_t count : {std::size_t(0), std::size_t(1), std::size_t(2),
+            for (std::size_t count : {0uz, 1uz, 2uz,
                                       n, n + 3, string_type::npos}) {
                 for (std::size_t source_pos = 0; source_pos <= n; ++source_pos) {
                     for (std::size_t source_len = 0; source_pos + source_len <= n;
@@ -166,15 +171,15 @@ void run_exhaustive(results& result, std::size_t max_n) {
 template<typename CharT>
 void run_selected(results& result) {
     using string_type = cow::basic_cow_string<CharT>;
-    for (std::size_t n : {std::size_t(31), std::size_t(64), std::size_t(129)}) {
+    for (std::size_t n : {31uz, 64uz, 129uz}) {
         const std::basic_string<CharT> old = make_old<CharT>(n);
-        for (std::size_t pos : {std::size_t(0), n / 2, n}) {
-            for (std::size_t count : {std::size_t(0), std::size_t(1), n / 2,
+        for (std::size_t pos : {0uz, n / 2, n}) {
+            for (std::size_t count : {0uz, 1uz, n / 2,
                                       n, string_type::npos}) {
-                for (std::size_t source_pos : {std::size_t(0), std::size_t(1), n / 2,
+                for (std::size_t source_pos : {0uz, 1uz, n / 2,
                                                n - 1, n}) {
-                    for (std::size_t source_len : {std::size_t(0), n - source_pos}) {
-                        for (std::size_t cap : {std::size_t(0), n + 1, 2 * n + 4}) {
+                    for (std::size_t source_len : {0uz, n - source_pos}) {
+                        for (std::size_t cap : {0uz, n + 1, 2 * n + 4}) {
                             for (bool shrink : {false, true}) {
                                 for (bool shared : {false, true}) {
                                     for (call_mode mode : all_modes) {
@@ -237,26 +242,240 @@ void check_external(results& result, const std::basic_string<CharT>& old,
 template<typename CharT>
 void run_external(results& result) {
     using string_type = cow::basic_cow_string<CharT>;
-    for (std::size_t n : {std::size_t(0), std::size_t(1), std::size_t(5),
-                          std::size_t(10), std::size_t(31), std::size_t(64),
-                          std::size_t(129)}) {
+    for (std::size_t n : {0uz, 1uz, 5uz,
+                          10uz, 31uz, 64uz,
+                          129uz}) {
         const std::basic_string<CharT> old = make_old<CharT>(n);
-        for (std::size_t source_len : {std::size_t(0), std::size_t(1),
-                                       std::size_t(5), std::size_t(40)}) {
+        for (std::size_t source_len : {0uz, 1uz,
+                                       5uz, 40uz}) {
             std::basic_string<CharT> source;
             source.reserve(source_len);
             for (std::size_t i = 0; i < source_len; ++i) {
                 source.push_back(static_cast<CharT>(CharT('A') + CharT((i * 5 + 1) % 26)));
             }
-            for (std::size_t pos : {std::size_t(0), n / 2, n}) {
-                for (std::size_t count : {std::size_t(0), std::size_t(1), n / 2,
+            for (std::size_t pos : {0uz, n / 2, n}) {
+                for (std::size_t count : {0uz, 1uz, n / 2,
                                           n, string_type::npos}) {
-                    for (std::size_t cap : {std::size_t(0), n + 1, 2 * n + 4}) {
+                    for (std::size_t cap : {0uz, n + 1, 2 * n + 4}) {
                         for (bool shrink : {false, true}) {
                             check_external(result, old, pos, count, source,
                                            cap, shrink, false);
                             check_external(result, old, pos, count, source,
                                            cap, shrink, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Replace whose source belongs to a different object sharing the same
+// allocation: both the receiver and the source are substring views of one base
+// string. The receiver is shared, so the in-place path cannot run and the
+// fallback has to keep the source valid while the receiver detaches.
+template<typename CharT>
+void run_cross_sharing(results& result) {
+    using string_type = cow::basic_cow_string<CharT>;
+
+    // One allocation, three owners: the base string plus two overlapping
+    // substring views. The receiver replaces with a range taken from either
+    // the other view or the base itself, so the source can sit before, inside
+    // or after the receiver's own live range.
+    const std::basic_string<CharT> whole = make_old<CharT>(96);
+    constexpr std::size_t view_len = 40;      // above SSO capacity for every char type
+    constexpr std::size_t receiver_pos = 10;
+    const std::basic_string<CharT> receiver_text = whole.substr(receiver_pos, view_len);
+
+    const auto text = [](const string_type& s) {
+        return std::basic_string<CharT>(std::as_const(s).data(), s.size());
+    };
+
+    for (std::size_t source_pos : {0uz, 20uz, 50uz}) {
+        const std::basic_string<CharT> view_text = whole.substr(source_pos, view_len);
+        // 0: the other view, 1: the owning base, 2: the receiver itself.
+        for (int source_kind : {0, 1, 2}) {
+            const std::basic_string<CharT>& source_text = source_kind == 1 ? whole
+                                                     : source_kind == 2 ? receiver_text
+                                                                        : view_text;
+            for (std::size_t pos : {0uz, 20uz, view_len}) {
+                for (std::size_t count : {0uz, 1uz,
+                                          20uz, string_type::npos}) {
+                    for (std::size_t src_pos : {0uz, 10uz, 30uz}) {
+                        for (std::size_t src_len : {0uz, 1uz,
+                                                    20uz, view_len}) {
+                            if (src_pos + src_len > view_len) {
+                                continue;
+                            }
+                            for (bool via_iterators : {false, true}) {
+                                const std::size_t rcount = std::min(count, view_len - pos);
+                                const std::basic_string<CharT> want =
+                                    receiver_text.substr(0, pos)
+                                  + source_text.substr(src_pos, src_len)
+                                  + receiver_text.substr(pos + rcount);
+
+                                string_type base(whole.begin(), whole.end());
+                                string_type other(base, source_pos, view_len);
+                                string_type receiver(base, receiver_pos, view_len);
+                                const bool shared_before = receiver.is_shared()
+                                    && base.cur_count() == 3 && other.cur_count() == 3;
+
+                                const string_type& cs = source_kind == 1 ? base
+                                                        : source_kind == 2 ? receiver
+                                                                           : other;
+                                if (via_iterators) {
+                                    receiver.replace(pos, count, cs.cbegin() + src_pos,
+                                                     cs.cbegin() + src_pos + src_len);
+                                } else {
+                                    receiver.replace(pos, count, cs.data() + src_pos,
+                                                     cs.data() + src_pos + src_len);
+                                }
+
+                                ++result.cases;
+                                const std::basic_string<CharT> got = text(receiver);
+                                const bool base_ok = text(base) == whole;
+                                const bool other_ok = text(other) == view_text;
+                                // Writing through a shared view detaches only the
+                                // receiver: the other two owners keep sharing.
+                                const bool detached_ok =
+                                    receiver.cur_count() == 1 && base.cur_count() == 2;
+                                if (got != want || !shared_before || !base_ok
+                                    || !other_ok || !detached_ok) {
+                                    ++result.failures;
+                                    if (result.failures <= 10) {
+                                        std::println(stderr,
+                                            "FAIL cross-sharing pos={} count={} src=[{}, {}) "
+                                            "iterators={} source_kind={} shared={} base_ok={} "
+                                            "other_ok={} detached_ok={}",
+                                            pos, count, src_pos, src_pos + src_len,
+                                            int(via_iterators), source_kind,
+                                            int(shared_before), int(base_ok),
+                                            int(other_ok), int(detached_ok));
+                                        print_sequence("want", want);
+                                        print_sequence("got ", got);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// An exclusive string whose live range starts in the middle of its allocation:
+// a substring view that outlived the owning string. In-place replace must not
+// silently re-base the result at the allocation start, because the object keeps
+// pointing at its own offset.
+template<typename CharT>
+void run_prefixed_inplace(results& result) {
+    using string_type = cow::basic_cow_string<CharT>;
+
+    const std::basic_string<CharT> whole = make_old<CharT>(96);
+    constexpr std::size_t view_len = 40;      // above SSO capacity for every char type
+
+    const auto text = [](const string_type& s) {
+        return std::basic_string<CharT>(std::as_const(s).data(), s.size());
+    };
+
+    for (std::size_t prefix : {1uz, 5uz, 10uz,
+                               20uz}) {
+        const std::basic_string<CharT> view_text = whole.substr(prefix, view_len);
+        for (std::size_t pos : {0uz, 1uz, 5uz,
+                                10uz, 20uz, view_len}) {
+            for (std::size_t count : {0uz, 1uz, 5uz,
+                                      10uz, string_type::npos}) {
+                for (std::size_t src_pos : {0uz, 1uz, 5uz,
+                                            10uz, 30uz}) {
+                    for (std::size_t src_len : {0uz, 1uz, 5uz,
+                                                10uz, 25uz,
+                                                40uz}) {
+                        if (src_pos + src_len > view_len) {
+                            continue;
+                        }
+                        const std::size_t rcount = std::min(count, view_len - pos);
+                        const std::basic_string<CharT> want =
+                            view_text.substr(0, pos)
+                          + view_text.substr(src_pos, src_len)
+                          + view_text.substr(pos + rcount);
+
+                        string_type owner(whole.begin(), whole.end());
+                        string_type view(owner, prefix, view_len);
+                        owner.clear();          // the view is now the only owner
+                        const bool sole_owner = view.cur_count() == 1;
+
+                        view.replace(pos, count, std::as_const(view).data() + src_pos,
+                                     std::as_const(view).data() + src_pos + src_len);
+
+                        ++result.cases;
+                        const std::basic_string<CharT> got = text(view);
+                        if (got != want || !sole_owner) {
+                            ++result.failures;
+                            if (result.failures <= 10) {
+                                std::println(stderr,
+                                    "FAIL prefixed prefix={} pos={} count={} src=[{}, {}) "
+                                    "sole_owner={}",
+                                    prefix, pos, count, src_pos, src_pos + src_len,
+                                    int(sole_owner));
+                                print_sequence("want", want);
+                                print_sequence("got ", got);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Source lies in the same allocation but (partly) outside the live range of the receiver,
+// e.g. a prefix of the allocation whose tail contains the head of the receiver.
+template<typename CharT>
+void run_outside_source(results& result) {
+    using string_type = cow::basic_cow_string<CharT>;
+
+    const std::basic_string<CharT> whole = make_old<CharT>(96);
+    constexpr std::size_t view_len = 40;
+
+    for (std::size_t prefix : {std::size_t(5), std::size_t(10), std::size_t(20)}) {
+        const std::basic_string<CharT> view_text = whole.substr(prefix, view_len);
+        for (std::size_t pos : {std::size_t(0), std::size_t(1), std::size_t(3), std::size_t(5),
+                                std::size_t(10), std::size_t(20), view_len}) {
+            for (std::size_t count : {std::size_t(0), std::size_t(1), std::size_t(5),
+                                      std::size_t(10), std::size_t(30), string_type::npos}) {
+                for (std::size_t src_abs = 0; src_abs < 96; src_abs += 1) {
+                    for (std::size_t src_len : {std::size_t(1), std::size_t(5), std::size_t(10),
+                                                std::size_t(15), std::size_t(25),
+                                                std::size_t(45)}) {
+                        if (src_abs + src_len > whole.size()) {
+                            continue;
+                        }
+                        const std::size_t rcount = std::min(count, view_len - pos);
+                        const std::basic_string<CharT> want =
+                            view_text.substr(0, pos)
+                          + whole.substr(src_abs, src_len)
+                          + view_text.substr(pos + rcount);
+
+                        string_type owner(whole.begin(), whole.end());
+                        string_type view(owner, prefix, view_len);
+                        owner.clear();
+                        const CharT* const base = std::as_const(view).data() - prefix;
+
+                        view.replace(pos, count, base + src_abs, base + src_abs + src_len);
+
+                        ++result.cases;
+                        const std::basic_string<CharT> got(std::as_const(view).data(),
+                                                           view.size());
+                        if (got != want) {
+                            ++result.failures;
+                            if (result.failures <= 10) {
+                                std::println(stderr,
+                                    "FAIL outside prefix={} pos={} count={} abs=[{}, {})",
+                                    prefix, pos, count, src_abs, src_abs + src_len);
+                                print_sequence("want", want);
+                                print_sequence("got ", got);
+                            }
                         }
                     }
                 }
@@ -299,6 +518,9 @@ results run_suite(const char* name, std::size_t exhaustive_n,
     run_exhaustive<CharT>(result, exhaustive_n);
     run_selected<CharT>(result);
     run_external<CharT>(result);
+    run_cross_sharing<CharT>(result);
+    run_prefixed_inplace<CharT>(result);
+    run_outside_source<CharT>(result);
     run_random<CharT>(result, random_iterations, seed);
     std::println("[replace_self] {:<8} cases={} failures={}",
                  name, result.cases, result.failures);

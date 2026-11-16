@@ -14,10 +14,12 @@
 #include <string>
 #include <string_view>
 #include <span>
+#include <inplace_vector>
 #include <memory>
 #include <atomic>
 #include <bit>
 #include <algorithm>
+#include <cstring>
 #include <initializer_list>
 #include <ranges>
 #include <functional>
@@ -359,6 +361,17 @@ concept string_like = requires(const S& s) {
 template<string_like S>
 using char_type = S::value_type;
 
+template<typename T, typename U>
+bool overlap(const T& x, const U& y) noexcept {
+    const void* const xb = std::to_address(std::ranges::begin(x));
+    const void* const xe = std::to_address(std::ranges::end(x));
+    const void* const yb = std::to_address(std::ranges::begin(y));
+    const void* const ye = std::to_address(std::ranges::end(y));
+    static constexpr std::less<> less{};
+    contract_assert(!less(xe, xb) && !less(ye, yb));
+    return less(xb, ye) && less(yb, xe);
+}
+
 } // namespace cow::details
 
 template<typename CharT, typename Allocator = std::allocator<CharT>>
@@ -684,6 +697,72 @@ private:
             // Need reallocation
             allocate_for_replace();
         }
+    }
+
+    bool try_inplace_self_replace(const size_type pos, const size_type count,
+                                  const char_type* const src, const size_type add_size)
+    {
+        if (!exclusive()) {
+            return false;
+        }
+        const size_type old_size = size();
+        const size_type rcount = std::ranges::min(count, old_size - pos);
+        const size_type new_size = old_size - rcount + add_size;
+        if (new_size > storage.real_capacity()) {
+            return false;
+        }
+        std::span<char_type> alloc = status().allocated
+            ? storage.allocation()
+            : std::span<char_type>(storage.sso.data);
+        char_type* const data = alloc.data();
+        const char_type* const old_data = std::as_const(*this).data();
+        string_view_type head(old_data, pos);
+        string_view_type tail(old_data + pos + rcount, old_data + old_size);
+        string_view_type source(src, src + add_size);
+        std::span<char_type> head_dest(data, pos);
+        std::span<char_type> tail_dest(data + pos + add_size, data + new_size);
+        std::span<char_type> source_dest(data + pos, data + pos + add_size);
+        // Tail never overlaps with head destination
+        // Head may overlap with tail destination, but just copy head first
+        const auto strmov = [](auto src, auto dst) {
+            const auto* const b = std::ranges::data(src);
+            const auto* const e = std::ranges::data(src) + std::ranges::size(src);
+            std::memmove(std::ranges::data(dst), b, (e - b) * sizeof(char_type));
+        };
+        const auto reset_region = [data, new_size, this] {
+            if (status().allocated) {
+                storage.dyn.data = data;
+                storage.dyn.size = new_size;
+            } else {
+                storage.sso.size = static_cast<unsigned char>(new_size);
+            }
+        };
+        const bool hs = details::overlap(head_dest, source);
+        const bool sh = details::overlap(source_dest, head);
+        const bool ts = details::overlap(tail_dest, source);
+        const bool st = details::overlap(source_dest, tail);
+        if (!hs && !st) {
+            strmov(head, head_dest);
+            strmov(source, source_dest);
+            strmov(tail, tail_dest);
+            reset_region();
+            return true;
+        }
+        if (!sh && !st) {
+            strmov(source, source_dest);
+            strmov(head, head_dest);
+            strmov(tail, tail_dest);
+            reset_region();
+            return true;
+        }
+        if (!ts && !hs) {
+            strmov(head, head_dest);
+            strmov(tail, tail_dest);
+            strmov(source, source_dest);
+            reset_region();
+            return true;
+        }
+        return false;
     }
 
 public:
@@ -1630,15 +1709,38 @@ public:
                 std::ranges::copy_n(src, add_size, storage.data() + pos);
                 return *this;
             }
+            if (try_inplace_self_replace(pos, count, src, add_size)) {
+                return *this;
+            }
         }
-        if constexpr (std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>
-                   || std::forward_iterator<std::decay_t<Iter>>) {
+        static constexpr bool can_distance =
+            std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>
+         || std::forward_iterator<std::decay_t<Iter>>;
+        if constexpr (can_distance) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            basic_cow_string cp(*this, get_allocator());
-            cp.adjust_old_for_replace(pos, count, add_size);
-            std::ranges::copy(std::forward<Iter>(iter), std::forward<Sent>(sent), cp.storage.data() + pos);
-            cp.swap(*this);
-            return *this;
+            const auto cal_new_size = [&, this] {
+                const size_type old_size = size();
+                const size_type rcount = std::ranges::min(count, old_size - pos);
+                return old_size - rcount + add_size;
+            };
+            if (!exclusive() || cal_new_size() > storage.real_capacity()) {
+                basic_cow_string cp(*this, get_allocator());
+                cp.adjust_old_for_replace(pos, count, add_size);
+                std::ranges::copy(std::forward<Iter>(iter), std::forward<Sent>(sent), cp.storage.data() + pos);
+                cp.swap(*this);
+                return *this;
+            }
+            std::ranges::subrange r(
+                std::counted_iterator(std::forward<Iter>(iter), add_size),
+                std::default_sentinel);
+            static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
+            if (add_size < static_buffer_max) {
+                std::inplace_vector<char_type, static_buffer_max> buffer(std::from_range, std::move(r));
+                return replace(pos, count, string_view_type(buffer));
+            } else {
+                string_type cp(std::from_range, std::move(r), get_allocator());
+                return replace(pos, count, cp);
+            }
         } else {
             std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
             string_type cp(std::from_range, std::move(r), get_allocator());

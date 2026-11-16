@@ -1294,7 +1294,8 @@ public:
         // so we have to do it ourselves
         if (status().allocated) {
             if (can_write_sso(size())) {
-                // TODO: Can we really reach here? Test later.
+                // In most part of cow_string, mechanisms eagerly write to SSO when possible.
+                // The only possible way to reach here right now is reserve() then shrink.
                 write_sso_release(view());
             } else if (!exclusive() || size() < capacity()) {
                 allocate_exclusive_buffer(view());

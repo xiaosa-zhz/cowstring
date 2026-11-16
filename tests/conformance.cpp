@@ -1,7 +1,7 @@
 // Conformance checks against std::string for operations whose semantics
-// match.  cow_string intentionally requires compile-time string literals for
-// its null-terminated pointer APIs, so runtime data is passed as string_view
-// or pointer + count here.
+// match.  cow_string has no null-terminated pointer API (no c_str()), so
+// runtime data is passed as string_view or pointer + count here, and only
+// data()/view() are compared against std::string.
 #define COW_STRING_TEST_STATUS
 #include "cowstring.hpp"
 
@@ -52,8 +52,7 @@ void report_failure(const char* what) {
 void check_same(const C& c, const S& s, const char* what) {
     ++R.cases;
     const bool same = c.size() == s.size()
-        && c.view() == SV(s)
-        && c.c_str()[c.size()] == '\0';
+        && c.view() == SV(s);
     if (!same) {
         report_failure(what);
         if (R.failures <= 20) {
@@ -191,8 +190,9 @@ void test_accessors() {
     check_bool(std::equal(cow_buf, cow_buf + 3, std_buf), true, "copy content");
 
     check_bool(SV(c.data(), c.size()) == SV(base), true, "data");
-    check_bool(SV(c.c_str(), c.size()) == SV(base), true, "c_str");
-    check_bool(c.c_str()[c.size()] == '\0', true, "c_str terminator");
+    // c_str() and its null terminator were removed: data() is only guaranteed
+    // to expose size() characters, so check it stays the view's buffer.
+    check_bool(c.data() == c.view().data(), true, "data matches view");
 
     check_same(C(c.begin(), c.end()), S(base.begin(), base.end()),
                "iterator range");
@@ -784,7 +784,10 @@ void test_cow_semantics() {
 
     C small = "small";
     C small_copy = small;
-    check_bool(small.is_literal() && small_copy.is_literal(), true, "literal copy");
+    // The literal source keeps pointing at static storage, but a copy of text
+    // that fits the SSO buffer materializes into that buffer instead.
+    check_bool(small.is_literal(), true, "short literal stays bound to static");
+    check_bool(small_copy.is_small(), true, "copy of short literal uses SSO");
     small_copy.push_back('!');
     check_same(small, S("small"), "literal source unchanged");
     check_same(small_copy, S("small!"), "literal target mutated");

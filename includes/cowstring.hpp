@@ -1688,7 +1688,7 @@ public:
         // Transfer iterators to index eagerly to avoid issues if r is the current object.
         const size_type index = first - cbegin();
         const size_type count = last - first;
-        return replace(index, count, std::forward<R>(r));
+        return replace_with_range(index, count, std::forward<R>(r));
     }
 
 private:

@@ -119,7 +119,7 @@ consteval bool test_access() {
     }
     if (s.view() != std::string_view("abcdef")
         || std::string_view(s.data(), s.size()) != "abcdef"
-        || s.c_str()[s.size()] != '\0') {
+        || s.data() != s.view().data()) {
         return false;
     }
     if (!std::ranges::equal(s, std::string_view("abcdef"))

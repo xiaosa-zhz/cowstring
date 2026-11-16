@@ -29,19 +29,22 @@ namespace cow {
 
 namespace details {
 
+inline constexpr std::meta::info valid_char_types[] = {
+    ^^char, ^^wchar_t, ^^char8_t, ^^char16_t, ^^char32_t
+};
+
 template<typename CharT>
-inline constexpr bool is_valid_char_type = 
-    std::is_same_v<CharT, char>
- || std::is_same_v<CharT, wchar_t>
- || std::is_same_v<CharT, char8_t>
- || std::is_same_v<CharT, char16_t>
- || std::is_same_v<CharT, char32_t>;
+inline constexpr bool is_valid_char_type =
+    std::ranges::find(valid_char_types, ^^CharT) != std::ranges::end(valid_char_types);
+
+inline constexpr std::size_t max_char_alignment = alignment_of(
+    std::ranges::max(valid_char_types, {}, &std::meta::alignment_of));
 
 template<typename SizeT, typename CharT>
 inline constexpr SizeT cow_max_size = std::numeric_limits<SizeT>::max() / (sizeof(CharT) * 2);
 
 template<typename SizeT>
-struct alignas(4) ctrl_blk {
+struct alignas(max_char_alignment) ctrl_blk {
     const SizeT capacity;
     std::atomic_size_t ref_count;
 

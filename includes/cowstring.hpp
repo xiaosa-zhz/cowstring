@@ -14,7 +14,6 @@
 #include <string>
 #include <string_view>
 #include <span>
-#include <inplace_vector>
 #include <memory>
 #include <atomic>
 #include <bit>
@@ -1421,7 +1420,7 @@ public:
         post (exclusive())
     {
         // TODO: add approximately_sized_range branch when supported
-        return append(std::ranges::begin(r), std::ranges::end(r));
+        return replace_with_range(size(), npos, std::forward<R>(r));
     }
 
     basic_cow_string& operator+=(string_view_type sv)
@@ -1601,7 +1600,6 @@ public:
         post (exclusive())
     {
         check_pos(pos);
-        // The size bookkeeping happens inside adjust_old_for_replace.
         adjust_old_for_replace(pos, count, count2);
         std::ranges::fill_n(storage.data() + pos, count2, ch);
         return *this;
@@ -1633,18 +1631,19 @@ public:
                 return *this;
             }
         }
-        static constexpr std::size_t inplace_buffer_size = 1024 / sizeof(char_type);
-        if constexpr (std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>) {
+        if constexpr (std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>
+                   || std::forward_iterator<std::decay_t<Iter>>) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            if (add_size <= inplace_buffer_size) {
-                auto r = std::ranges::subrange(std::forward<Iter>(iter), std::forward<Sent>(sent));
-                std::inplace_vector<char_type, inplace_buffer_size> cp(std::from_range, std::move(r));
-                return replace(pos, count, string_view_type(cp));
-            }
+            basic_cow_string cp(*this, get_allocator());
+            cp.adjust_old_for_replace(pos, count, add_size);
+            std::ranges::copy(std::forward<Iter>(iter), std::forward<Sent>(sent), cp.storage.data() + pos);
+            cp.swap(*this);
+            return *this;
+        } else {
+            std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
+            string_type cp(std::from_range, std::move(r), get_allocator());
+            return replace(pos, count, cp);
         }
-        std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
-        string_type cp(std::from_range, std::move(r), get_allocator());
-        return replace(pos, count, cp);
     }
 
     template<typename Iter, typename Sent>

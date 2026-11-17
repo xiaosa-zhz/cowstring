@@ -799,7 +799,7 @@ private:
             } else if (new_cap > capacity()) {
                 // Can use prefix to get enough capacity without reallocation.
                 const auto alloc = storage.allocation();
-                std::ranges::copy_n(storage.dyn.data, storage.dyn.size, alloc.data());
+                std::ranges::copy(view(), alloc.data());
                 storage.dyn.data = alloc.data();
                 return alloc.data();
             } else {
@@ -1597,7 +1597,7 @@ public:
         if (status().allocated) {
             storage.dyn.size = r;
         } else {
-            storage.sso.size = r;
+            storage.sso.size = static_cast<unsigned char>(r);
         }
     }
 
@@ -1643,13 +1643,13 @@ public:
     basic_cow_string& append(string_view_type sv)
         post (exclusive())
     {
-        return append(sv.begin(), sv.end());
+        return append(sv.data(), sv.size());
     }
 
     basic_cow_string& append(const char_type* s, size_type count)
         post (exclusive())
     {
-        return append(string_view_type(s, count));
+        return append(s, s + count);
     }
 
     template<typename Iter, typename Sent>
@@ -1708,7 +1708,7 @@ public:
     basic_cow_string& insert(size_type index, string_view_type str)
         post (exclusive())
     {
-        return insert(index, str.begin(), str.end());
+        return insert(index, str.data(), str.size());
     }
 
     basic_cow_string& insert(size_type index, string_view_type str,
@@ -1721,7 +1721,7 @@ public:
     basic_cow_string& insert(size_type index, const char_type* s, size_type count)
         post (exclusive())
     {
-        return insert(index, string_view_type(s, count));
+        return insert(index, s, s + count);
     }
 
     template<typename Iter, typename Sent>
@@ -1735,7 +1735,7 @@ public:
     basic_cow_string& insert(size_type index, std::initializer_list<char_type> il)
         post (exclusive())
     {
-        return insert(index, il.begin(), il.end());
+        return insert(index, string_view_type(il));
     }
 
     iterator insert(const_iterator pos, size_type count, char_type ch)
@@ -1769,7 +1769,8 @@ public:
         pre (is_my_iter(pos))
         post (exclusive())
     {
-        return insert(pos, il.begin(), il.end());
+        string_view_type sv(il);
+        return insert(pos, sv.data(), sv.data() + sv.size());
     }
 
     template<details::container_compatible_range<char_type> R>
@@ -1820,7 +1821,7 @@ public:
     basic_cow_string& replace(size_type pos, size_type count, string_view_type str)
         post (exclusive())
     {
-        return replace(pos, count, str.begin(), str.end());
+        return replace(pos, count, str.data(), str.size());
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last, string_view_type str)
@@ -1837,14 +1838,14 @@ public:
                               const char_type* cstr, size_type count2)
         post (exclusive())
     {
-        return replace(pos, count, string_view_type(cstr, count2));
+        return replace(pos, count, cstr, cstr + count2);
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last,
                               const char_type* cstr, size_type count2)
         post (exclusive())
     {
-        return replace(first, last, string_view_type(cstr, count2));
+        return replace(first, last, cstr, cstr + count2);
     }
 
     basic_cow_string& replace(size_type pos, size_type count, size_type count2, char_type ch)

@@ -1075,7 +1075,7 @@ public:
     constexpr basic_cow_string(string_view_type sv,
                                size_type pos, size_type count,
                                const allocator_type& alloc = allocator_type())
-        : basic_cow_string(string_view_type(sv).substr(pos, count), alloc)
+        : basic_cow_string(string_view_type(sv).subview(pos, count), alloc)
     {}
 
     constexpr basic_cow_string(string_view_type sv, size_type pos,
@@ -1503,7 +1503,7 @@ public:
         requires (!std::convertible_to<const StringViewLike&, const char_type*>)
     constexpr basic_cow_string& assign(const StringViewLike& sv,
                                        size_type pos, size_type count = npos) {
-        return assign(string_view_type(sv).substr(pos, count));
+        return assign(string_view_type(sv).subview(pos, count));
     }
 
     template<details::container_compatible_range<char_type> R>
@@ -1616,7 +1616,7 @@ public:
     basic_cow_string& append(string_view_type sv, size_type pos, size_type count = npos)
         post (exclusive())
     {
-        return append(sv.substr(pos, count));
+        return append(sv.subview(pos, count));
     }
 
     basic_cow_string& append(string_view_type sv)
@@ -1694,7 +1694,7 @@ public:
                              size_type s_index, size_type count = npos)
         post (exclusive())
     {
-        return insert(index, str.substr(s_index, count));
+        return insert(index, str.subview(s_index, count));
     }
 
     basic_cow_string& insert(size_type index, const char_type* s, size_type count)
@@ -1793,7 +1793,7 @@ public:
                               size_type pos2, size_type count2 = npos)
         post (exclusive())
     {
-        return replace(pos, count, str.substr(pos2, count2));
+        return replace(pos, count, str.subview(pos2, count2));
     }
 
     basic_cow_string& replace(size_type pos, size_type count, string_view_type str)

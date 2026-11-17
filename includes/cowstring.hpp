@@ -1888,13 +1888,19 @@ public:
         check_pos(pos);
         if constexpr (std::contiguous_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            const char_type* const src = std::to_address(iter);
-            if (!storage.self_alias(src)) {
+            const auto* const src = std::to_address(iter);
+            if constexpr (std::convertible_to<decltype(src), const char_type*>) {
+                if (!storage.self_alias(src)) {
+                    adjust_old_for_replace(pos, count, add_size);
+                    std::ranges::copy_n(src, add_size, storage.data() + pos);
+                    return *this;
+                }
+                if (try_inplace_self_replace(pos, count, src, add_size)) {
+                    return *this;
+                }
+            } else {
                 adjust_old_for_replace(pos, count, add_size);
                 std::ranges::copy_n(src, add_size, storage.data() + pos);
-                return *this;
-            }
-            if (try_inplace_self_replace(pos, count, src, add_size)) {
                 return *this;
             }
         }

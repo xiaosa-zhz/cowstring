@@ -47,6 +47,11 @@ void check_equal(std::size_t got, std::size_t want, std::string_view what) {
 using S = cow::cow_string;
 using SV = std::string_view;
 
+// Contiguous range whose value type is not char but is convertible to it.
+struct not_char {
+    constexpr operator char() const noexcept { return '7'; }
+};
+
 // ---------------------------------------------------------------- construction
 void test_constructors() {
     const S defaulted;
@@ -65,6 +70,12 @@ void test_constructors() {
     const std::vector<char> vec{'a', 'b'};
     const S from_range(std::from_range, vec);
     check(from_range == "ab", "ctor(from_range)");
+
+    const std::array<not_char, 4> converted{};
+    const S from_converted_iter(converted.begin(), converted.end());
+    check(from_converted_iter == "7777", "ctor(iter,sent,convertible contiguous)");
+    const S from_converted_range(std::from_range, converted);
+    check(from_converted_range == "7777", "ctor(from_range,convertible contiguous)");
 
     const S ptr_count("abcd", 2);
     check(ptr_count == "ab", "ctor(ptr,count)");

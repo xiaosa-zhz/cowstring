@@ -13,6 +13,11 @@
 
 using namespace cow::literals;
 
+// Contiguous range whose value type is not char but is convertible to it.
+struct not_char {
+    constexpr operator char() const noexcept { return '7'; }
+};
+
 static_assert(cow::cow_string("abc") == "abc");
 static_assert(cow::cow_string("abc") < "abd");
 static_assert("abc" == cow::cow_string("abc"));
@@ -50,6 +55,16 @@ consteval bool test_construction() {
     }
     const cow::cow_string range_str(std::from_range, arr);
     if (range_str != "wxyz") {
+        return false;
+    }
+
+    constexpr std::array<not_char, 4> converted{};
+    constexpr cow::cow_string converted_iter(converted.begin(), converted.end());
+    if (converted_iter != "7777") {
+        return false;
+    }
+    constexpr cow::cow_string converted_range(std::from_range, converted);
+    if (converted_range != "7777") {
         return false;
     }
 

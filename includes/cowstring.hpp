@@ -644,9 +644,7 @@ private:
         std::start_lifetime(storage.sso);
         storage.sso = {};
         char_type* const data = storage.sso.data;
-        if (!view.empty()) {
-            std::ranges::copy_n(view.data(), view.size(), data);
-        }
+        std::ranges::copy_n(view.data(), view.size(), data);
         storage.sso.size = static_cast<unsigned char>(view.size());
         return storage.sso.data;
     }

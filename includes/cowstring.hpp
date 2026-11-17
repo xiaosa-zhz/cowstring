@@ -1898,26 +1898,10 @@ public:
                 if (try_inplace_self_replace(pos, count, src, add_size)) {
                     return *this;
                 }
-            } else {
-                adjust_old_for_replace(pos, count, add_size);
-                std::ranges::copy_n(src, add_size, storage.data() + pos);
-                return *this;
             }
         }
         if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            const auto cal_new_size = [&, this] {
-                const size_type old_size = size();
-                const size_type rcount = std::ranges::min(count, old_size - pos);
-                return old_size - rcount + add_size;
-            };
-            if (!exclusive() || cal_new_size() > real_capacity()) {
-                basic_cow_string cp(*this, get_allocator());
-                cp.adjust_old_for_replace(pos, count, add_size);
-                std::ranges::copy_n(std::move(iter), add_size, cp.storage.data() + pos);
-                cp.swap(*this);
-                return *this;
-            }
             std::ranges::subrange r{
                 std::counted_iterator(std::move(iter), add_size),
                 std::default_sentinel
@@ -1925,10 +1909,12 @@ public:
             static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
             if (add_size < static_buffer_max) {
                 std::inplace_vector<char_type, static_buffer_max> buffer(std::from_range, std::move(r));
-                return replace(pos, count, string_view_type(buffer));
+                const char_type* const data = buffer.data();
+                return replace(pos, count, data, data + buffer.size());
             } else {
                 string_type cp(std::from_range, std::move(r), get_allocator());
-                return replace(pos, count, cp);
+                const char_type* const data = cp.data();
+                return replace(pos, count, data, data + cp.size());
             }
         } else {
             if (status() == details::small && empty()) {
@@ -1941,13 +1927,13 @@ public:
                     while (iter != sent) {
                         buffer.push_back(*iter);
                         if (buffer.size() == buffer.capacity()) {
-                            append(string_view_type(buffer));
+                            append(buffer.data(), buffer.size());
                             buffer.clear();
                         }
                         ++iter;
                     }
                     if (!buffer.empty()) {
-                        append(string_view_type(buffer));
+                        append(buffer.data(), buffer.size());
                     }
                 } catch (...) {
                     clear();
@@ -1958,7 +1944,8 @@ public:
             } else {
                 std::ranges::subrange r(std::move(iter), std::move(sent));
                 string_type cp(std::from_range, std::move(r), get_allocator());
-                return replace(pos, count, cp);
+                const char_type* const data = cp.data();
+                return replace(pos, count, data, data + cp.size());
             }
         }
     }

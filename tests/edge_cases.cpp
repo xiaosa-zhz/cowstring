@@ -170,6 +170,97 @@ void test_self_swap_and_assign() {
 }
 
 // ---------------------------------------------------------------------------
+// Capacity policy of replace() that has to reallocate:
+//   * an exclusive string keeps its contents in place, so growing it doubles
+//     the allocation and the spare capacity is reused by later replaces;
+//   * a string that has to detach from a shared allocation is rebuilt from
+//     scratch, so it asks for exactly the new size and never carries the old
+//     (possibly much larger) allocation along.
+void test_replace_growth_policy() {
+    // Exclusive string: double the allocation, and reuse it next time.
+    {
+        S s(40, 'a');
+        const std::size_t old_real_capacity = s.real_capacity();
+        const std::string first(20, 'b');
+
+        s.replace(0, 0, first);  // 60 > 48, so this one reallocates
+        check_equal(s.size(), 60, "growing replace size");
+        check(s.real_capacity() >= 2 * old_real_capacity, "growing replace doubles the allocation");
+        check(s.real_capacity() >= s.size(), "grown allocation fits the new size");
+
+        const char* const buffer = std::as_const(s).data();
+        const std::string second(20, 'c');
+        s.replace(0, 0, second);  // 80 <= the doubled capacity: stays in place
+        check_equal(s.size(), 80, "second growing replace size");
+        check(std::as_const(s).data() == buffer, "second growing replace reuses the spare capacity");
+        check(s.view() == SV(second + first + std::string(40, 'a')),
+              "growing replace contents");
+
+        // A replace that also shrinks the string does not allocate at all.
+        const char* const buffer_after = std::as_const(s).data();
+        s.replace(0, 40, SV("tiny"));
+        check(std::as_const(s).data() == buffer_after, "shrinking replace keeps the buffer");
+        check(s.view() == SV("tiny" + std::string(40, 'a')), "shrinking replace contents");
+    }
+
+    // Shared string that has to detach: the new size still fits the old
+    // allocation, so ask for exactly the new size instead of doubling.
+    {
+        S owner(100, 'x');
+        S shared = owner;
+        check(shared.is_shared(), "receiver shares its allocation");
+        const std::size_t old_real_capacity = shared.real_capacity();
+        const std::string added(10, 'y');  // 110 <= 112
+
+        shared.replace(0, 0, added);
+        check_equal(shared.size(), 110, "shared growing replace size");
+        check(shared.exclusive(), "shared growing replace detaches");
+        check(shared.real_capacity() >= shared.size(), "detached allocation fits the contents");
+        check(shared.real_capacity() < 2 * old_real_capacity,
+              "shared growing replace does not double");
+        check(shared.view() == SV(added + std::string(100, 'x')),
+              "shared growing replace contents");
+        check(owner.view() == SV(std::string(100, 'x')), "shared owner is left untouched");
+        check_equal(owner.cur_count(), 1, "owner is alone again after the detach");
+    }
+
+    // Shared string that has to detach and outgrow the old allocation: the new
+    // allocation is still exactly the new size, not the doubled old one.
+    {
+        S owner(100, 'x');
+        S shared = owner;
+        const std::size_t old_real_capacity = shared.real_capacity();
+        const std::string added(40, 'z');  // 140 > 112
+
+        shared.replace(0, 0, added);
+        check_equal(shared.size(), 140, "shared outgrowing replace size");
+        check(shared.real_capacity() >= shared.size(), "detached allocation fits the contents");
+        check(shared.real_capacity() < 2 * old_real_capacity,
+              "shared outgrowing replace does not double");
+        check(shared.view() == SV(added + std::string(100, 'x')),
+              "shared outgrowing replace contents");
+        check_equal(owner.cur_count(), 1, "owner is alone again after the outgrowing detach");
+    }
+
+    // Shared string that shrinks while detaching: the much larger old
+    // allocation must not be carried over to the fresh one.
+    {
+        S owner(1200, 'a');
+        S shared = owner;
+        const std::size_t old_real_capacity = shared.real_capacity();
+        shared.replace(0, 1100, SV("x"));  // 101 characters left
+
+        check_equal(shared.size(), 101, "shrinking detach size");
+        check(shared.view() == SV("x" + std::string(100, 'a')), "shrinking detach contents");
+        check(shared.real_capacity() >= shared.size(), "shrinking detach fits the contents");
+        check(shared.real_capacity() < old_real_capacity,
+              "shrinking detach drops the old allocation size");
+        check(owner.view() == SV(std::string(1200, 'a')), "shrinking detach leaves the owner alone");
+        check_equal(owner.cur_count(), 1, "owner is alone again after the shrinking detach");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // A stateful allocator whose instances do not compare equal, does not
 // propagate on copy/move/swap and is not always equal: strings owned by it can
 // never share storage, so every cross-allocator operation has to deep copy.
@@ -619,6 +710,7 @@ void test_allocation_too_large() {
 int main() {
     test_move_from_literal();
     test_prefix_reserve_reuse();
+    test_replace_growth_policy();
     test_self_swap_and_assign();
     test_allocator_mismatch();
     test_large_noncontiguous_replace();

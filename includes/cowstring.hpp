@@ -840,8 +840,17 @@ private:
         const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
         const size_type new_size = old_size - rcount + add_size;
-        const auto allocate_for_replace = [&, this] {
-            auto* const control = details::allocate(get_allocator(), new_size);
+        const auto allocate_for_replace = [&, this]<bool is_exclusive>(std::bool_constant<is_exclusive>) {
+            size_type new_capacity = new_size;
+            if constexpr (is_exclusive) {
+                const size_type old_real_cap = real_capacity();
+                contract_assert(new_size > old_real_cap);
+                const size_type grow = std::saturating_mul(old_real_cap, growing_factor);
+                const size_type ceil_grow = std::ranges::min(grow, max_size());
+                const size_type final_cap = std::ranges::max(new_size, ceil_grow);
+                new_capacity = final_cap;
+            }
+            auto* const control = details::allocate(get_allocator(), new_capacity);
             char_type* const data = control->template data<char_type>();
             // Copy head and tail of original string, and leave a hole for new content
             const char_type* const old_data = std::as_const(*this).data();
@@ -855,7 +864,7 @@ private:
             };
         };
         if (!exclusive()) {
-            allocate_for_replace();
+            allocate_for_replace(std::false_type{});
         } else if (new_size <= capacity()) {
             // If tail capacity is enough, move tail only
             char_type* const data = storage.data();
@@ -876,7 +885,7 @@ private:
             storage.dyn.size = new_size;
         } else {
             // Need reallocation
-            allocate_for_replace();
+            allocate_for_replace(std::true_type{});
         }
     }
 

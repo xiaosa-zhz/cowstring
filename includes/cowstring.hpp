@@ -340,7 +340,8 @@ public:
     constexpr string_iterator& operator+=(difference_type n) noexcept pre (cur != nullptr) { cur += n; return *this; }
     constexpr string_iterator& operator-=(difference_type n) noexcept pre (cur != nullptr) { cur -= n; return *this; }
     constexpr string_iterator operator+(difference_type n) const noexcept pre (cur != nullptr) { return auto(*this) += n; }
-    friend constexpr string_iterator operator+(difference_type n, string_iterator it) noexcept pre (it.cur != nullptr) { return it += n; }
+    // There is a GCC bug makes contracts on hidden friend of template class cause ICE
+    friend constexpr string_iterator operator+(difference_type n, string_iterator it) noexcept { return it += n; }
     constexpr string_iterator operator-(difference_type n) const noexcept pre (cur != nullptr) { return auto(*this) -= n; }
     constexpr difference_type operator-(string_iterator other) const noexcept pre (cur != nullptr && other.cur != nullptr) { return cur - other.cur; }
     constexpr reference operator[](difference_type n) const noexcept pre (cur != nullptr) { return *(cur + n); }

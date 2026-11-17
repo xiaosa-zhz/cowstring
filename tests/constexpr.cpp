@@ -127,6 +127,23 @@ consteval bool test_access() {
         || *(s.begin() + 2) != 'c') {
         return false;
     }
+    if (*(2 + s.begin()) != 'c' || *(s.end() - 2) != 'e'
+        || *(s.begin() + 5) != 'f' || s.begin()[3] != 'd'
+        || std::prev(s.end()) != s.begin() + 5) {
+        return false;
+    }
+    if (!(s.begin() < s.begin() + 1) || s.begin() >= s.end()
+        || (s.begin() + 2) != (2 + s.begin())
+        || (s.begin() + 2) - s.begin() != 2) {
+        return false;
+    }
+    {
+        auto it = s.end() - 1;
+        it -= 3;
+        if (*it != 'c' || it.operator->() != s.data() + 2) {
+            return false;
+        }
+    }
     if (s.rbegin()[0] != 'f' || s.rbegin()[5] != 'a') {
         return false;
     }

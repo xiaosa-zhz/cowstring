@@ -153,6 +153,24 @@ void test_accessors() {
     check_equal(std::size_t(s.rend() - s.rbegin()), s.size(), "rend");
     check(*s.crbegin() == '!', "crbegin");
     check(s.crend() != s.crbegin(), "crend");
+    // Iterator arithmetic: only n + it, it + n and it - it were used before,
+    // so make sure the members that walk backwards are instantiated too.
+    auto backwards = s.begin() + 5;
+    backwards -= 2;
+    check(*backwards == 'l', "iterator operator-=(n)");
+    check(*(s.begin() + 5) == ',', "iterator operator+(n)");
+    check(*(2 + s.begin()) == 'l', "iterator operator+(n, it)");
+    check(*(s.end() - 2) == 'd', "iterator operator-(n)");
+    check_equal(std::size_t(s.end() - s.begin()), s.size(), "iterator operator-(it)");
+    check(s.begin()[1] == 'e', "iterator operator[](n)");
+    // Relational/equality operators of the iterator (both directions of <=>).
+    auto lo = s.begin();
+    auto hi = s.begin() + 1;
+    check(lo < hi && lo <= hi, "iterator less/less-equal");
+    check(hi > lo && hi >= lo, "iterator greater/greater-equal");
+    check(lo != hi && !(lo == hi), "iterator equality");
+    check(!(hi < lo) && !(lo > hi), "iterator negative comparison");
+    check(*std::prev(s.end()) == '!', "iterator is a contiguous iterator");
     check(s.front() == 'H' && s.back() == '!', "front/back const");
     check(s[0] == 'H', "operator[] const");
     check(s.at(1) == 'e', "at const");
@@ -302,6 +320,12 @@ void test_modifiers() {
     check(*w.data() == 'a', "data()");
     check(w.begin() != w.end(), "begin/end");
     check_equal(std::size_t(w.end() - w.begin()), 3, "end()");
+    auto w_backwards = w.end();
+    w_backwards -= 2;
+    check(*w_backwards == 'a', "mutable iterator operator-=(n)");
+    check(*(w.end() - 3) == *(w.begin()), "mutable iterator operator-(n)");
+    check(*(2 + w.begin()) == *(w.begin() + 2), "mutable iterator operator+(n, it)");
+    check(w.begin() + 1 > w.begin(), "iterator comparison");
     check(*w.rbegin() == 'a', "rbegin()");
     check(w.rend() != w.rbegin(), "rend()");
     check(w.front() == 'a' && w.back() == 'a', "front()/back()");

@@ -108,6 +108,17 @@ target("test_api_coverage")
     add_exp_feature_flags()
     add_tests("api_coverage")
 
+-- Narrow branches of the COW state machine that the broad suites miss
+target("test_edge_cases")
+    set_kind("binary")
+    set_default(false)
+    set_toolchains("gcc-trunk")
+    set_runtimes("stdc++_shared")
+    add_files("tests/edge_cases.cpp")
+    add_deps("contract")
+    add_exp_feature_flags()
+    add_tests("edge_cases")
+
 -- Compile-time conformance; in-place mutators are intentionally excluded
 target("test_constexpr")
     set_kind("binary")

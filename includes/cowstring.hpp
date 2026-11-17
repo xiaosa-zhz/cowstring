@@ -1883,7 +1883,7 @@ public:
             if (!exclusive() || cal_new_size() > real_capacity()) {
                 basic_cow_string cp(*this, get_allocator());
                 cp.adjust_old_for_replace(pos, count, add_size);
-                std::ranges::copy(std::forward<Iter>(iter), std::forward<Sent>(sent), cp.storage.data() + pos);
+                std::ranges::copy_n(std::forward<Iter>(iter), add_size, cp.storage.data() + pos);
                 cp.swap(*this);
                 return *this;
             }

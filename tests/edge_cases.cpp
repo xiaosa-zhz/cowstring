@@ -22,6 +22,7 @@
 #include <memory>
 #include <print>
 #include <sstream>
+#include <generator>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -372,41 +373,15 @@ void test_large_noncontiguous_replace() {
     check(from_input.view() == SV("aXYZc"), "single pass replace contents");
 }
 
-// ---------------------------------------------------------------------------
-// A single pass source (input only, not sized, not forward) cannot be measured
-// nor materialised up front. When the receiver is empty the characters are
-// appended one by one instead, and a failure while reading has to leave the
-// string empty again with no buffer behind.
-struct failing_input_iterator {
-    using value_type = char;
-    using difference_type = std::ptrdiff_t;
-    using iterator_concept = std::input_iterator_tag;
-    using iterator_category = std::input_iterator_tag;
-
-    const char* cur = nullptr;
-    const char* fail_at = nullptr;
-    int* failures = nullptr;
-
-    char operator*() const { return *cur; }
-
-    failing_input_iterator& operator++() {
-        ++cur;
+std::generator<char> failing_input_range(const char* begin, const char* end, const char* fail_at, int* failures) {
+    for (const char* cur = begin; cur != end; ++cur) {
         if (cur == fail_at) {
             ++*failures;
             throw std::runtime_error("source read failed");
         }
-        return *this;
+        co_yield *cur;
     }
-
-    void operator++(int) { ++*this; }
-
-    // Only the position matters: the failure bookkeeping is not part of the
-    // value, otherwise the end sentinel would never compare equal.
-    friend bool operator==(const failing_input_iterator& lhs,
-                           const failing_input_iterator& rhs) {
-        return lhs.cur == rhs.cur;
-    }
-};
+}
 
 void test_replace_single_pass_empty() {
     // Success path: an empty receiver is filled directly, without a temporary.
@@ -435,11 +410,19 @@ void test_replace_single_pass_empty() {
     check(grown.view() == SV(std::string(100, 'g')), "long single pass source");
     check(grown.is_owned(), "long single pass source is allocated");
 
-    // A non-empty receiver keeps using the materialise-then-replace path.
+    // A non-empty receiver keeps using the materialise-then-replace path: once
+    // for a literal receiver (not small) and once for a small receiver that
+    // merely has characters in it.
     std::istringstream small_input("XY");
     S non_empty("abc");
     non_empty.replace(1, 1, std::istream_iterator<char>(small_input), std::istream_iterator<char>());
     check(non_empty.view() == SV("aXYc"), "single pass source into a non-empty string");
+
+    std::istringstream tiny_input("Q");
+    S tiny(2, 'a');
+    check(tiny.is_small() && !tiny.empty(), "receiver is small but not empty");
+    tiny.replace(0, 0, std::istreambuf_iterator<char>(tiny_input), std::istreambuf_iterator<char>{});
+    check(tiny.view() == SV("Qaa"), "small non-empty receiver materialises the source");
 }
 
 void test_replace_throw_in_source() {
@@ -450,9 +433,7 @@ void test_replace_throw_in_source() {
         S s;
         bool caught = false;
         try {
-            s.replace(0, 0,
-                      failing_input_iterator{text, text + 3, &failures},
-                      failing_input_iterator{text + 8, text + 8, &failures});
+            s.replace_with_range(0, 0, failing_input_range(text, text + 8, text + 3, &failures));
         } catch (const std::runtime_error&) {
             caught = true;
         }
@@ -470,9 +451,7 @@ void test_replace_throw_in_source() {
         S s;
         bool caught = false;
         try {
-            s.replace(0, 0,
-                      failing_input_iterator{text.data(), text.data() + 30, &failures},
-                      failing_input_iterator{text.data() + 40, text.data() + 40, &failures});
+            s.replace_with_range(0, 0, failing_input_range(text.data(), text.data() + 40, text.data() + 30, &failures));
         } catch (const std::runtime_error&) {
             caught = true;
         }
@@ -491,8 +470,7 @@ void test_replace_throw_in_source() {
         int failures = 0;
         bool caught = false;
         try {
-            S built(failing_input_iterator{text.data(), text.data() + 30, &failures},
-                    failing_input_iterator{text.data() + 40, text.data() + 40, &failures});
+            S built(std::from_range, failing_input_range(text.data(), text.data() + 40, text.data() + 30, &failures));
             (void)built;
         } catch (const std::runtime_error&) {
             caught = true;

@@ -373,6 +373,136 @@ void test_large_noncontiguous_replace() {
 }
 
 // ---------------------------------------------------------------------------
+// A single pass source (input only, not sized, not forward) cannot be measured
+// nor materialised up front. When the receiver is empty the characters are
+// appended one by one instead, and a failure while reading has to leave the
+// string empty again with no buffer behind.
+struct failing_input_iterator {
+    using value_type = char;
+    using difference_type = std::ptrdiff_t;
+    using iterator_concept = std::input_iterator_tag;
+    using iterator_category = std::input_iterator_tag;
+
+    const char* cur = nullptr;
+    const char* fail_at = nullptr;
+    int* failures = nullptr;
+
+    char operator*() const { return *cur; }
+
+    failing_input_iterator& operator++() {
+        ++cur;
+        if (cur == fail_at) {
+            ++*failures;
+            throw std::runtime_error("source read failed");
+        }
+        return *this;
+    }
+
+    void operator++(int) { ++*this; }
+
+    // Only the position matters: the failure bookkeeping is not part of the
+    // value, otherwise the end sentinel would never compare equal.
+    friend bool operator==(const failing_input_iterator& lhs,
+                           const failing_input_iterator& rhs) {
+        return lhs.cur == rhs.cur;
+    }
+};
+
+void test_replace_single_pass_empty() {
+    // Success path: an empty receiver is filled directly, without a temporary.
+    // istreambuf_iterator is a plain single pass input iterator and, unlike
+    // istream_iterator, does not skip whitespace.
+    std::istringstream input("streamed in");
+    S s;
+    s.replace(0, 0, std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>{});
+    check(s.view() == SV("streamed in"), "single pass source into an empty string");
+    check(s.exclusive(), "replace leaves the string exclusive");
+
+    // The iterator range constructor forwards to the same path, which is what
+    // the direct append loop mainly exists for.
+    std::istringstream ctor_input("constructed");
+    S built(std::istreambuf_iterator<char>(ctor_input), std::istreambuf_iterator<char>{});
+    check(built.view() == SV("constructed"), "single pass iterator constructor");
+
+    std::istringstream empty_input("");
+    S from_empty(std::istreambuf_iterator<char>(empty_input), std::istreambuf_iterator<char>{});
+    check(from_empty.empty(), "single pass source can be empty");
+    check(from_empty.exclusive(), "empty result is exclusive");
+
+    // Enough characters to grow past the small buffer through push_back.
+    std::istringstream long_input(std::string(100, 'g'));
+    S grown(std::istreambuf_iterator<char>(long_input), std::istreambuf_iterator<char>{});
+    check(grown.view() == SV(std::string(100, 'g')), "long single pass source");
+    check(grown.is_owned(), "long single pass source is allocated");
+
+    // A non-empty receiver keeps using the materialise-then-replace path.
+    std::istringstream small_input("XY");
+    S non_empty("abc");
+    non_empty.replace(1, 1, std::istream_iterator<char>(small_input), std::istream_iterator<char>());
+    check(non_empty.view() == SV("aXYc"), "single pass source into a non-empty string");
+}
+
+void test_replace_throw_in_source() {
+    // The read fails while the string is still small.
+    {
+        const char* const text = "abcdefgh";
+        int failures = 0;
+        S s;
+        bool caught = false;
+        try {
+            s.replace(0, 0,
+                      failing_input_iterator{text, text + 3, &failures},
+                      failing_input_iterator{text + 8, text + 8, &failures});
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        check(caught, "replace propagates a source failure");
+        check(s.empty(), "partial characters are cleared");
+        check(s.is_small(), "small string has nothing to release");
+        check_equal(std::size_t(failures), 1, "the source failed once");
+    }
+
+    // The read fails after the string has already grown an allocation, so the
+    // cleanup has to clear it and give the buffer back.
+    {
+        const std::string text(40, 'x');
+        int failures = 0;
+        S s;
+        bool caught = false;
+        try {
+            s.replace(0, 0,
+                      failing_input_iterator{text.data(), text.data() + 30, &failures},
+                      failing_input_iterator{text.data() + 40, text.data() + 40, &failures});
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        check(caught, "replace propagates a late source failure");
+        check(s.empty(), "grown string is cleared after a failure");
+        check(s.is_small(), "grown string releases its buffer after a failure");
+        check_equal(std::size_t(failures), 1, "the late source failed once");
+        s.push_back('z');  // still usable
+        check(s.view() == SV("z"), "string is reusable after a source failure");
+    }
+
+    // A throwing iterator range constructor: the exception escapes and the
+    // half-built string is released without leaking.
+    {
+        const std::string text(40, 'y');
+        int failures = 0;
+        bool caught = false;
+        try {
+            S built(failing_input_iterator{text.data(), text.data() + 30, &failures},
+                    failing_input_iterator{text.data() + 40, text.data() + 40, &failures});
+            (void)built;
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        check(caught, "iterator constructor propagates a source failure");
+        check_equal(std::size_t(failures), 1, "the constructor source failed once");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // operator+ tries the left operand, then the right operand, then falls back to
 // appending into the left one.
 void test_operator_plus_paths() {
@@ -473,6 +603,8 @@ int main() {
     test_self_swap_and_assign();
     test_allocator_mismatch();
     test_large_noncontiguous_replace();
+    test_replace_single_pass_empty();
+    test_replace_throw_in_source();
     test_operator_plus_paths();
     test_shrink_to_fit_no_slack();
     test_allocation_too_large();

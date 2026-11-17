@@ -1905,9 +1905,28 @@ public:
                 return replace(pos, count, cp);
             }
         } else {
-            std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
-            string_type cp(std::from_range, std::move(r), get_allocator());
-            return replace(pos, count, cp);
+            if (status() == details::small && empty()) {
+                // Although we know nothing about source range,
+                // no one could alias with a empty string anyway.
+                // This branch is mostly for constructors.
+                auto i = std::forward<Iter>(iter);
+                auto s = std::forward<Sent>(sent);
+                try {
+                    while (i != s) {
+                        push_back(*i);
+                        ++i;
+                    }
+                } catch (...) {
+                    clear();
+                    shrink_to_fit();
+                    throw;
+                }
+                return *this;
+            } else {
+                std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
+                string_type cp(std::from_range, std::move(r), get_allocator());
+                return replace(pos, count, cp);
+            }
         }
     }
 

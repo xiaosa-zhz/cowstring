@@ -361,63 +361,75 @@ concept string_like = requires(const S& s) {
 template<string_like S>
 using char_type = S::value_type;
 
-bool overlap(const auto& x, const auto& y) noexcept {
-    const void* const xb = std::to_address(std::ranges::begin(x));
-    const void* const xe = std::to_address(std::ranges::end(x));
-    const void* const yb = std::to_address(std::ranges::begin(y));
-    const void* const ye = std::to_address(std::ranges::end(y));
+inline bool overlap(std::span<const std::byte> x, std::span<const std::byte> y) noexcept {
+    const std::byte* const xb = x.data();
+    const std::byte* const xe = xb + x.size();
+    const std::byte* const yb = y.data();
+    const std::byte* const ye = yb + y.size();
     static constexpr std::less<> less{};
     contract_assert(!less(xe, xb) && !less(ye, yb));
     return less(xb, ye) && less(yb, xe);
 }
 
-bool enclose(const auto& small, const auto& large) noexcept {
-    const void* const sb = std::to_address(std::ranges::begin(small));
-    const void* const se = std::to_address(std::ranges::end(small));
-    const void* const lb = std::to_address(std::ranges::begin(large));
-    const void* const le = std::to_address(std::ranges::end(large));
+inline bool enclose(std::span<const std::byte> small,
+                    std::span<const std::byte> large) noexcept
+{
+    const std::byte* const sb = small.data();
+    const std::byte* const se = sb + small.size();
+    const std::byte* const lb = large.data();
+    const std::byte* const le = lb + large.size();
     static constexpr std::less<> less{};
     contract_assert(!less(se, sb) && !less(le, lb));
     return !less(sb, lb) && !less(le, se);
 }
 
-bool prefix_or_suffix(const auto& small, const auto& large) noexcept {
-    const void* const sb = std::to_address(std::ranges::begin(small));
-    const void* const se = std::to_address(std::ranges::end(small));
-    const void* const lb = std::to_address(std::ranges::begin(large));
-    const void* const le = std::to_address(std::ranges::end(large));
+inline bool prefix_or_suffix(std::span<const std::byte> small,
+                             std::span<const std::byte> large) noexcept
+{
+    const std::byte* const sb = small.data();
+    const std::byte* const se = sb + small.size();
+    const std::byte* const lb = large.data();
+    const std::byte* const le = lb + large.size();
     static constexpr std::less_equal<> less_equal{};
     static constexpr std::equal_to<> equal{};
     return (equal(sb, lb) && less_equal(se, le))
         || (equal(se, le) && less_equal(lb, sb));
 }
 
-auto overlap_region(const auto& x, const auto& y) noexcept {
+inline std::span<const std::byte> overlap_region(std::span<const std::byte> x,
+                                                 std::span<const std::byte> y) noexcept
+{
     contract_assert(details::overlap(x, y));
-    const auto* const xb = std::to_address(std::ranges::begin(x));
-    const auto* const xe = std::to_address(std::ranges::end(x));
-    const auto* const yb = std::to_address(std::ranges::begin(y));
-    const auto* const ye = std::to_address(std::ranges::end(y));
+    const auto* const xb = x.data();
+    const auto* const xe = xb + x.size();
+    const auto* const yb = y.data();
+    const auto* const ye = yb + y.size();
     static constexpr std::less<> less{};
     const auto* const begin = std::ranges::max(xb, yb, less);
     const auto* const end = std::ranges::min(xe, ye, less);
-    return std::span(begin, end);
+    return { begin, end };
 }
 
-auto rebase_region(const auto& sub, const auto& base, const auto& rebase) noexcept {
+template<typename T>
+inline std::span<T> rebase_region(std::span<const std::byte> sub,
+                                  std::span<const std::byte> base,
+                                  std::span<T> rebase) noexcept
+{
     contract_assert(details::enclose(sub, base));
-    contract_assert(std::ranges::size(base) == std::ranges::size(rebase));
-    const auto* const sub_data = std::ranges::data(sub);
-    const auto* const base_data = std::ranges::data(base);
-    return rebase.subspan(sub_data - base_data, std::ranges::size(sub));
+    contract_assert(base.size() == rebase.size());
+    const auto* const sub_data = sub.data();
+    const auto* const base_data = base.data();
+    return rebase.subspan(sub_data - base_data, sub.size());
 }
 
-auto complement(const auto& sub, const auto& base) noexcept {
+inline std::span<const std::byte> complement(std::span<const std::byte> sub,
+                                             std::span<const std::byte> base) noexcept
+{
     contract_assert(details::prefix_or_suffix(sub, base));
-    const auto* const sb = std::to_address(std::ranges::begin(sub));
-    const auto* const se = std::to_address(std::ranges::end(sub));
-    const auto* const bb = std::to_address(std::ranges::begin(base));
-    const auto* const br = std::to_address(std::ranges::end(base));
+    const auto* const sb = sub.data();
+    const auto* const se = sb + sub.size();
+    const auto* const bb = base.data();
+    const auto* const br = bb + base.size();
     if (sb == bb) {
         return std::span(se, br);
     } else if (se == br) {

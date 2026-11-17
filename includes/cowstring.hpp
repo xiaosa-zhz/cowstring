@@ -783,7 +783,7 @@ private:
                 return allocate_exclusive_buffer(view(), new_cap);
             }
         } else {
-            const size_type old_real_cap = storage.real_capacity();
+            const size_type old_real_cap = real_capacity();
             if (new_cap > old_real_cap) {
                 // The auto growing branch
                 const size_type grow = std::saturating_mul(old_real_cap, growing_factor);
@@ -859,7 +859,7 @@ private:
             } else {
                 storage.sso.size = static_cast<unsigned char>(new_size);
             }
-        } else if (new_size <= storage.real_capacity()) {
+        } else if (new_size <= real_capacity()) {
             // If real capacity is enough, move head and tail to front
             contract_assert(status() == details::owned);
             const char_type* const data = storage.data();
@@ -883,7 +883,7 @@ private:
         const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
         const size_type new_size = old_size - rcount + add_size;
-        if (new_size > storage.real_capacity()) {
+        if (new_size > real_capacity()) {
             return false;
         }
         std::span<char_type> alloc = status().allocated
@@ -1130,7 +1130,6 @@ public:
 
     static constexpr size_type max_size() noexcept { return details::cow_max_size<size_type, char_type>; }
     constexpr size_type size() const noexcept { return storage.size(); }
-    constexpr size_type capacity() const noexcept { return storage.capacity(); }
     constexpr size_type length() const noexcept { return size(); }
     constexpr bool empty() const noexcept { return size() == 0; }
     constexpr string_view_type view() const noexcept { return storage.view(); }
@@ -1149,6 +1148,13 @@ public:
     constexpr const_reference front() const noexcept pre (!empty()) { return view().front(); }
     constexpr const_reference back() const noexcept pre (!empty()) { return view().back(); }
     constexpr const_reference operator[](size_type pos) const noexcept pre (pos < size()) { return view()[pos]; }
+
+    // Capacity that append does not make reallocation or content relocation.
+    constexpr size_type capacity() const noexcept { return storage.capacity(); }
+
+    // Capacity that append does not make reallocation, but may cause content relocation.
+    // Pointers and iterators are invalidated if such thing occurs.
+    constexpr size_type real_capacity() const noexcept { return storage.real_capacity(); }
 
     constexpr const_reference at(size_type pos) const {
         check_index(pos);
@@ -1874,7 +1880,7 @@ public:
                 const size_type rcount = std::ranges::min(count, old_size - pos);
                 return old_size - rcount + add_size;
             };
-            if (!exclusive() || cal_new_size() > storage.real_capacity()) {
+            if (!exclusive() || cal_new_size() > real_capacity()) {
                 basic_cow_string cp(*this, get_allocator());
                 cp.adjust_old_for_replace(pos, count, add_size);
                 std::ranges::copy(std::forward<Iter>(iter), std::forward<Sent>(sent), cp.storage.data() + pos);
@@ -1980,8 +1986,8 @@ constexpr COWString operator+(basic_cow_string<CharT, Allocator> lhs,
         return COWString(std::basic_string<CharT>(lhs) + std::basic_string<CharT>(rhs));
     } else {
         const auto total_size = lhs.size() + rhs.size();
-        const auto lhs_capacity = lhs.capacity();
-        const auto rhs_capacity = rhs.capacity();
+        const auto lhs_capacity = lhs.real_capacity();
+        const auto rhs_capacity = rhs.real_capacity();
         if (lhs.exclusive() && lhs_capacity >= total_size) {
             lhs.append(rhs);
             return lhs;

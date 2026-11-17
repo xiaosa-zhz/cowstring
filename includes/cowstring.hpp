@@ -278,9 +278,9 @@ union storage {
 };
 
 template<typename Iter, typename Sent, typename CharT>
-concept eligible_iter_and_sent = std::input_iterator<std::decay_t<Iter>>
-    && std::sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>
-    && std::convertible_to<std::iter_reference_t<std::decay_t<Iter>>, CharT>;
+concept eligible_iter_and_sent = std::input_iterator<Iter>
+    && std::sentinel_for<Sent, Iter>
+    && std::convertible_to<std::iter_reference_t<Iter>, CharT>;
 
 template<typename R, typename CharT>
 concept container_compatible_range = std::ranges::input_range<R>
@@ -957,16 +957,16 @@ public:
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    constexpr basic_cow_string(Iter&& iter, Sent&& sent,
+    constexpr basic_cow_string(Iter iter, Sent sent,
                                const allocator_type& alloc = allocator_type())
         : basic_cow_string(alloc)
     {
         if consteval {
             write_static_string(
-                std::ranges::subrange(std::forward<Iter>(iter), std::forward<Sent>(sent))
+                std::ranges::subrange(std::move(iter), std::move(sent))
             );
         } else {
-            append(std::forward<Iter>(iter), std::forward<Sent>(sent));
+            append(std::move(iter), std::move(sent));
         }
     }
 
@@ -1483,13 +1483,13 @@ public:
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    constexpr basic_cow_string& assign(Iter&& iter, Sent&& sent) {
+    constexpr basic_cow_string& assign(Iter iter, Sent sent) {
         if consteval {
-            std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
+            std::ranges::subrange r(std::move(iter), std::move(sent));
             write_static_string(std::move(r));
             return *this;
         } else {
-            return replace(0, npos, std::forward<Iter>(iter), std::forward<Sent>(sent));
+            return replace(0, npos, std::move(iter), std::move(sent));
         }
     }
 
@@ -1654,10 +1654,10 @@ public:
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    basic_cow_string& append(Iter&& iter, Sent&& sent)
+    basic_cow_string& append(Iter iter, Sent sent)
         post (exclusive())
     {
-        return replace(size(), npos, std::forward<Iter>(iter), std::forward<Sent>(sent));
+        return replace(size(), npos, std::move(iter), std::move(sent));
     }
 
     basic_cow_string& append(std::initializer_list<char_type> il)
@@ -1726,10 +1726,10 @@ public:
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    basic_cow_string& insert(size_type index, Iter&& iter, Sent&& sent)
+    basic_cow_string& insert(size_type index, Iter iter, Sent sent)
         post (exclusive())
     {
-        return replace(index, 0, std::forward<Iter>(iter), std::forward<Sent>(sent));
+        return replace(index, 0, std::move(iter), std::move(sent));
     }
 
     basic_cow_string& insert(size_type index, std::initializer_list<char_type> il)
@@ -1756,12 +1756,12 @@ public:
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    iterator insert(const_iterator pos, Iter&& iter, Sent&& sent)
+    iterator insert(const_iterator pos, Iter iter, Sent sent)
         pre (is_my_iter(pos))
         post (exclusive())
     {
         const size_type index = pos - cbegin();
-        insert(index, std::forward<Iter>(iter), std::forward<Sent>(sent));
+        insert(index, std::move(iter), std::move(sent));
         return begin() + index;
     }
 
@@ -1870,11 +1870,11 @@ public:
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    basic_cow_string& replace(size_type pos, size_type count, Iter&& iter, Sent&& sent)
+    basic_cow_string& replace(size_type pos, size_type count, Iter iter, Sent sent)
         post (exclusive())
     {
         check_pos(pos);
-        if constexpr (std::contiguous_iterator<std::decay_t<Iter>>) {
+        if constexpr (std::contiguous_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
             const char_type* const src = std::to_address(iter);
             if (!storage.self_alias(src)) {
@@ -1886,10 +1886,7 @@ public:
                 return *this;
             }
         }
-        static constexpr bool can_distance =
-            std::sized_sentinel_for<std::decay_t<Sent>, std::decay_t<Iter>>
-         || std::forward_iterator<std::decay_t<Iter>>;
-        if constexpr (can_distance) {
+        if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
             const auto cal_new_size = [&, this] {
                 const size_type old_size = size();
@@ -1899,13 +1896,14 @@ public:
             if (!exclusive() || cal_new_size() > real_capacity()) {
                 basic_cow_string cp(*this, get_allocator());
                 cp.adjust_old_for_replace(pos, count, add_size);
-                std::ranges::copy_n(std::forward<Iter>(iter), add_size, cp.storage.data() + pos);
+                std::ranges::copy_n(std::move(iter), add_size, cp.storage.data() + pos);
                 cp.swap(*this);
                 return *this;
             }
-            std::ranges::subrange r(
-                std::counted_iterator(std::forward<Iter>(iter), add_size),
-                std::default_sentinel);
+            std::ranges::subrange r{
+                std::counted_iterator(std::move(iter), add_size),
+                std::default_sentinel
+            };
             static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
             if (add_size < static_buffer_max) {
                 std::inplace_vector<char_type, static_buffer_max> buffer(std::from_range, std::move(r));
@@ -1919,18 +1917,16 @@ public:
                 // Although we know nothing about source range,
                 // no one could alias with a empty string anyway.
                 // This branch is mostly for constructors.
-                auto i = std::forward<Iter>(iter);
-                auto s = std::forward<Sent>(sent);
                 static constexpr std::size_t cache_size = 128 / sizeof(char_type);
                 try {
                     std::inplace_vector<char_type, cache_size> buffer;
-                    while (i != s) {
-                        buffer.push_back(*i);
+                    while (iter != sent) {
+                        buffer.push_back(*iter);
                         if (buffer.size() == buffer.capacity()) {
                             append(string_view_type(buffer));
                             buffer.clear();
                         }
-                        ++i;
+                        ++iter;
                     }
                     if (!buffer.empty()) {
                         append(string_view_type(buffer));
@@ -1942,7 +1938,7 @@ public:
                 }
                 return *this;
             } else {
-                std::ranges::subrange r(std::forward<Iter>(iter), std::forward<Sent>(sent));
+                std::ranges::subrange r(std::move(iter), std::move(sent));
                 string_type cp(std::from_range, std::move(r), get_allocator());
                 return replace(pos, count, cp);
             }
@@ -1951,14 +1947,14 @@ public:
 
     template<typename Iter, typename Sent>
         requires details::eligible_iter_and_sent<Iter, Sent, char_type>
-    basic_cow_string& replace(const_iterator first, const_iterator last, Iter&& iter, Sent&& sent)
+    basic_cow_string& replace(const_iterator first, const_iterator last, Iter iter, Sent sent)
         pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
         post (exclusive())
     {
         const size_type index = first - cbegin();
         const size_type count = last - first;
-        return replace(index, count, std::forward<Iter>(iter), std::forward<Sent>(sent));
+        return replace(index, count, std::move(iter), std::move(sent));
     }
 
     basic_cow_string& replace(size_type pos, size_type count,

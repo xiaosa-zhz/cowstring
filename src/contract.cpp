@@ -1,3 +1,4 @@
+// Custom contract violation handler for test purposes only.
 #include <contracts>
 #include <print>
 #include <stacktrace>

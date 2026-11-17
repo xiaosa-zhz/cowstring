@@ -400,25 +400,25 @@ inline std::span<const std::byte> overlap_region(std::span<const std::byte> x,
                                                  std::span<const std::byte> y) noexcept
 {
     contract_assert(details::overlap(x, y));
-    const auto* const xb = x.data();
-    const auto* const xe = xb + x.size();
-    const auto* const yb = y.data();
-    const auto* const ye = yb + y.size();
+    const std::byte* const xb = x.data();
+    const std::byte* const xe = xb + x.size();
+    const std::byte* const yb = y.data();
+    const std::byte* const ye = yb + y.size();
     static constexpr std::less<> less{};
-    const auto* const begin = std::ranges::max(xb, yb, less);
-    const auto* const end = std::ranges::min(xe, ye, less);
+    const std::byte* const begin = std::ranges::max(xb, yb, less);
+    const std::byte* const end = std::ranges::min(xe, ye, less);
     return { begin, end };
 }
 
 template<typename T>
-inline std::span<T> rebase_region(std::span<const std::byte> sub,
-                                  std::span<const std::byte> base,
-                                  std::span<T> rebase) noexcept
+std::span<T> rebase_region(std::span<const std::byte> sub,
+                           std::span<const std::byte> base,
+                           std::span<T> rebase) noexcept
 {
     contract_assert(details::enclose(sub, base));
     contract_assert(base.size() == rebase.size());
-    const auto* const sub_data = sub.data();
-    const auto* const base_data = base.data();
+    const std::byte* const sub_data = sub.data();
+    const std::byte* const base_data = base.data();
     return rebase.subspan(sub_data - base_data, sub.size());
 }
 
@@ -426,17 +426,23 @@ inline std::span<const std::byte> complement(std::span<const std::byte> sub,
                                              std::span<const std::byte> base) noexcept
 {
     contract_assert(details::prefix_or_suffix(sub, base));
-    const auto* const sb = sub.data();
-    const auto* const se = sb + sub.size();
-    const auto* const bb = base.data();
-    const auto* const br = bb + base.size();
+    const std::byte* const sb = sub.data();
+    const std::byte* const se = sb + sub.size();
+    const std::byte* const bb = base.data();
+    const std::byte* const br = bb + base.size();
     if (sb == bb) {
-        return std::span(se, br);
+        return { se, br };
     } else if (se == br) {
-        return std::span(bb, sb);
+        return { bb, sb };
     } else {
         std::unreachable();
     }
+}
+
+inline void spanmov(std::span<const std::byte> src, std::span<std::byte> dst) noexcept
+    pre (dst.size() >= src.size())
+{
+    std::memmove(dst.data(), src.data(), src.size());
 }
 
 inline bool try_inplace_self_replace(std::span<const std::byte> head,
@@ -448,42 +454,37 @@ inline bool try_inplace_self_replace(std::span<const std::byte> head,
 {
     // Tail never overlaps with head destination
     // Head may overlap with tail destination, but just copy head first
-    const auto strmov = [](auto src, auto dst) {
-        std::memmove(std::ranges::data(dst),
-                     std::ranges::data(src),
-                     std::ranges::size(src));
-    };
     const bool hs = details::overlap(head_dest, source);
     const bool sh = details::overlap(source_dest, head);
     const bool ts = details::overlap(tail_dest, source);
     const bool st = details::overlap(source_dest, tail);
     if (!hs && !st) {
-        strmov(head, head_dest);
-        strmov(source, source_dest);
-        strmov(tail, tail_dest);
+        spanmov(head, head_dest);
+        spanmov(source, source_dest);
+        spanmov(tail, tail_dest);
         return true;
     }
     if (!sh && !st) {
-        strmov(source, source_dest);
-        strmov(head, head_dest);
-        strmov(tail, tail_dest);
+        spanmov(source, source_dest);
+        spanmov(head, head_dest);
+        spanmov(tail, tail_dest);
         return true;
     }
     if (!ts && !hs) {
-        strmov(head, head_dest);
-        strmov(tail, tail_dest);
-        strmov(source, source_dest);
+        spanmov(head, head_dest);
+        spanmov(tail, tail_dest);
+        spanmov(source, source_dest);
         return true;
     }
     if (sh && hs && !st) {
         // Check if:
         // 1. The clobbered region of source can be recovered from the moved head, or
-        // 2. The clobbered region of head can be recovered from the moved source
-        // If doable, move tail after recovering the clobbered region
+        // 2. The clobbered region of head can be recovered from the moved source.
+        // If doable, move tail after recovering the clobbered region.
+        // Note that if clobbered region can be recovered, it is always head or tail of
+        // the total region of source or head.
         std::span<const std::byte> clob_hs = details::overlap_region(head_dest, source);
-        const bool hs_doable = details::enclose(clob_hs, head)
-                            && details::prefix_or_suffix(clob_hs, source);
-        if (hs_doable) {
+        if (details::enclose(clob_hs, head)) {
             // Clobbered region of source by copying head
             // can be recovered from the moved head
             std::span<const std::byte> recover =
@@ -493,16 +494,14 @@ inline bool try_inplace_self_replace(std::span<const std::byte> head,
                 details::rebase_region(clob_hs, source, source_dest);
             std::span<std::byte> unaffected_dest =
                 details::rebase_region(unaffected, source, source_dest);
-            strmov(head, head_dest);
-            strmov(unaffected, unaffected_dest);
-            strmov(recover, recover_dest);
-            strmov(tail, tail_dest);
+            spanmov(head, head_dest);
+            spanmov(unaffected, unaffected_dest);
+            spanmov(recover, recover_dest);
+            spanmov(tail, tail_dest);
             return true;
         }
         std::span<const std::byte> clob_sh = details::overlap_region(source_dest, head);
-        const bool sh_doable = details::enclose(clob_sh, source)
-                            && details::prefix_or_suffix(clob_sh, head);
-        if (sh_doable) {
+        if (details::enclose(clob_sh, source)) {
             // Clobbered region of head by copying source
             // can be recovered from the moved source
             std::span<const std::byte> recover =
@@ -512,19 +511,17 @@ inline bool try_inplace_self_replace(std::span<const std::byte> head,
                 details::rebase_region(clob_sh, head, head_dest);
             std::span<std::byte> unaffected_dest =
                 details::rebase_region(unaffected, head, head_dest);
-            strmov(source, source_dest);
-            strmov(unaffected, unaffected_dest);
-            strmov(recover, recover_dest);
-            strmov(tail, tail_dest);
+            spanmov(source, source_dest);
+            spanmov(unaffected, unaffected_dest);
+            spanmov(recover, recover_dest);
+            spanmov(tail, tail_dest);
             return true;
         }
     }
     if (st && ts && !hs) {
         // Similar as previous case, but for source-tail overlap and move head first
         std::span<const std::byte> clob_st = details::overlap_region(source_dest, tail);
-        const bool st_doable = details::enclose(clob_st, source)
-                            && details::prefix_or_suffix(clob_st, tail);
-        if (st_doable) {
+        if (details::enclose(clob_st, source)) {
             std::span<const std::byte> recover =
                 details::rebase_region(clob_st, source, source_dest);
             std::span<const std::byte> unaffected = details::complement(clob_st, tail);
@@ -532,16 +529,14 @@ inline bool try_inplace_self_replace(std::span<const std::byte> head,
                 details::rebase_region(clob_st, tail, tail_dest);
             std::span<std::byte> unaffected_dest =
                 details::rebase_region(unaffected, tail, tail_dest);
-            strmov(head, head_dest);
-            strmov(source, source_dest);
-            strmov(unaffected, unaffected_dest);
-            strmov(recover, recover_dest);
+            spanmov(head, head_dest);
+            spanmov(source, source_dest);
+            spanmov(unaffected, unaffected_dest);
+            spanmov(recover, recover_dest);
             return true;
         }
         std::span<const std::byte> clob_ts = details::overlap_region(tail_dest, source);
-        const bool ts_doable = details::enclose(clob_ts, tail)
-                            && details::prefix_or_suffix(clob_ts, source);
-        if (ts_doable) {
+        if (details::enclose(clob_ts, tail)) {
             std::span<const std::byte> recover =
                 details::rebase_region(clob_ts, tail, tail_dest);
             std::span<const std::byte> unaffected = details::complement(clob_ts, source);
@@ -549,10 +544,10 @@ inline bool try_inplace_self_replace(std::span<const std::byte> head,
                 details::rebase_region(clob_ts, source, source_dest);
             std::span<std::byte> unaffected_dest =
                 details::rebase_region(unaffected, source, source_dest);
-            strmov(head, head_dest);
-            strmov(tail, tail_dest);
-            strmov(unaffected, unaffected_dest);
-            strmov(recover, recover_dest);
+            spanmov(head, head_dest);
+            spanmov(tail, tail_dest);
+            spanmov(unaffected, unaffected_dest);
+            spanmov(recover, recover_dest);
             return true;
         }
     }

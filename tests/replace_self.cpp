@@ -484,6 +484,73 @@ void run_outside_source(results& result) {
     }
 }
 
+// Pathological case: the source is a string_view taken from a string that has
+// since been destroyed. The view still points into the allocation, which the
+// receiver now owns alone (a substring view outlived its owner), so the source
+// range may overhang the receiver's live range on the left, on the right, or
+// on both sides at once. Formally the view dangles, but the storage is still
+// alive through the receiver, so self-referencing replace must cope.
+template<typename CharT>
+void run_stale_view_source(results& result) {
+    using string_type = cow::basic_cow_string<CharT>;
+
+    const std::basic_string<CharT> whole = make_old<CharT>(96);
+    constexpr std::size_t view_len = 40;
+
+    for (std::size_t prefix : {std::size_t(5), std::size_t(10), std::size_t(20)}) {
+        const std::basic_string<CharT> view_text = whole.substr(prefix, view_len);
+        for (std::size_t pos : {std::size_t(0), std::size_t(10), std::size_t(20), view_len}) {
+            for (std::size_t count : {std::size_t(0), std::size_t(1), std::size_t(10),
+                                      string_type::npos}) {
+                for (std::size_t off : {std::size_t(0), std::size_t(2), std::size_t(5),
+                                        std::size_t(8), std::size_t(14), std::size_t(20),
+                                        std::size_t(30), std::size_t(50), std::size_t(90)}) {
+                    for (std::size_t len : {std::size_t(0), std::size_t(1), std::size_t(10),
+                                            std::size_t(23), std::size_t(30),
+                                            std::size_t(60)}) {
+                        if (off + len > whole.size()) {
+                            continue;
+                        }
+                        const std::size_t rcount = std::min(count, view_len - pos);
+                        const std::basic_string<CharT> want =
+                            view_text.substr(0, pos)
+                          + whole.substr(off, len)
+                          + view_text.substr(pos + rcount);
+
+                        string_type view;
+                        std::basic_string_view<CharT> stale;
+                        {
+                            string_type owner(whole.begin(), whole.end());
+                            stale = owner.view();     // spans the whole allocation
+                            view = string_type(owner, prefix, view_len);
+                        }   // owner is destroyed: the view is the last owner
+
+                        // The precondition that makes this case interesting.
+                        const bool sole_owner = view.cur_count() == 1;
+                        view.replace(pos, count, stale.data() + off,
+                                     stale.data() + off + len);
+
+                        ++result.cases;
+                        const std::basic_string<CharT> got(std::as_const(view).data(),
+                                                           view.size());
+                        if (got != want || !sole_owner) {
+                            ++result.failures;
+                            if (result.failures <= 10) {
+                                std::println(stderr,
+                                    "FAIL stale-view prefix={} pos={} count={} src=[{}, {}) "
+                                    "sole_owner={}",
+                                    prefix, pos, count, off, off + len, int(sole_owner));
+                                print_sequence("want", want);
+                                print_sequence("got ", got);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 template<typename CharT>
 void run_random(results& result, std::size_t iterations, std::uint64_t seed) {
     using string_type = cow::basic_cow_string<CharT>;
@@ -521,6 +588,7 @@ results run_suite(const char* name, std::size_t exhaustive_n,
     run_cross_sharing<CharT>(result);
     run_prefixed_inplace<CharT>(result);
     run_outside_source<CharT>(result);
+    run_stale_view_source<CharT>(result);
     run_random<CharT>(result, random_iterations, seed);
     std::println("[replace_self] {:<8} cases={} failures={}",
                  name, result.cases, result.failures);

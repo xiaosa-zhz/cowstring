@@ -1046,7 +1046,7 @@ public:
 
     constexpr basic_cow_string(std::initializer_list<char_type> il,
                                const allocator_type& alloc = allocator_type())
-        : basic_cow_string(il.begin(), il.end(), alloc)
+        : basic_cow_string(string_view_type(il), alloc)
     {}
 
     consteval basic_cow_string(const char_type* literal)
@@ -1456,7 +1456,7 @@ public:
         requires (!std::convertible_to<const StringViewLike&, const char_type*>)
     constexpr basic_cow_string& assign(const StringViewLike& sv) {
         const string_view_type view = sv;
-        return assign(view.begin(), view.end());
+        return assign(view.data(), view.data() + view.size());
     }
 
     template<std::convertible_to<string_view_type> StringViewLike>
@@ -1965,7 +1965,7 @@ public:
                               std::initializer_list<char_type> il)
         post (exclusive())
     {
-        return replace(pos, count, il.begin(), il.end());
+        return replace(pos, count, string_view_type(il));
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last,
@@ -1974,7 +1974,7 @@ public:
         pre (first <= last)
         post (exclusive())
     {
-        return replace(first, last, il.begin(), il.end());
+        return replace(first, last, string_view_type(il));
     }
 
     template<details::container_compatible_range<char_type> R>

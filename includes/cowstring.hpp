@@ -1911,10 +1911,19 @@ public:
                 // This branch is mostly for constructors.
                 auto i = std::forward<Iter>(iter);
                 auto s = std::forward<Sent>(sent);
+                static constexpr std::size_t cache_size = 128 / sizeof(char_type);
                 try {
+                    std::inplace_vector<char_type, cache_size> buffer;
                     while (i != s) {
-                        push_back(*i);
+                        buffer.push_back(*i);
+                        if (buffer.size() == buffer.capacity()) {
+                            append(string_view_type(buffer));
+                            buffer.clear();
+                        }
                         ++i;
+                    }
+                    if (!buffer.empty()) {
+                        append(string_view_type(buffer));
                     }
                 } catch (...) {
                     clear();

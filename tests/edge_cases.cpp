@@ -52,6 +52,11 @@ void check_equal(std::size_t got, std::size_t want, std::string_view what) {
 using S = cow::cow_string;
 using SV = std::string_view;
 
+// Mirrors the chunk buffer that the single pass append loop of replace() fills
+// before handing the characters over to the string. Kept in sync on purpose:
+// the sizes below are chosen to land on, and just past, a chunk boundary.
+constexpr std::size_t single_pass_chunk = 128 / sizeof(S::value_type);
+
 // ---------------------------------------------------------------------------
 // Moving from a literal with a position/count has no allocation to steal, so
 // the destination has to stay bound to the static storage at the requested
@@ -404,11 +409,26 @@ void test_replace_single_pass_empty() {
     check(from_empty.empty(), "single pass source can be empty");
     check(from_empty.exclusive(), "empty result is exclusive");
 
-    // Enough characters to grow past the small buffer through push_back.
+    // Enough characters to grow past the small buffer.
     std::istringstream long_input(std::string(100, 'g'));
     S grown(std::istreambuf_iterator<char>(long_input), std::istreambuf_iterator<char>{});
     check(grown.view() == SV(std::string(100, 'g')), "long single pass source");
     check(grown.is_owned(), "long single pass source is allocated");
+
+    // Source larger than one chunk: the buffer has to be flushed while reading,
+    // and the tail left over is flushed once the source is exhausted.
+    const std::string bulk(3 * single_pass_chunk + 7, 'b');
+    std::istringstream bulk_input(bulk);
+    S from_bulk(std::istreambuf_iterator<char>(bulk_input), std::istreambuf_iterator<char>{});
+    check(from_bulk.view() == SV(bulk), "single pass source spanning several chunks");
+    check(from_bulk.is_owned(), "chunked single pass source is allocated");
+
+    // An exact multiple of the chunk size leaves the buffer empty at the end,
+    // so the final flush is skipped.
+    const std::string exact(2 * single_pass_chunk, 'c');
+    std::istringstream exact_input(exact);
+    S from_exact(std::istreambuf_iterator<char>(exact_input), std::istreambuf_iterator<char>{});
+    check(from_exact.view() == SV(exact), "single pass source on a chunk boundary");
 
     // A non-empty receiver keeps using the materialise-then-replace path: once
     // for a literal receiver (not small) and once for a small receiver that
@@ -461,6 +481,27 @@ void test_replace_throw_in_source() {
         check_equal(std::size_t(failures), 1, "the late source failed once");
         s.push_back('z');  // still usable
         check(s.view() == SV("z"), "string is reusable after a source failure");
+    }
+
+    // The read fails only after whole chunks have already been handed over to
+    // the string, so the cleanup has to drop those as well.
+    {
+        const std::string text(3 * single_pass_chunk + 9, 'w');
+        const char* const fail_at = text.data() + 2 * single_pass_chunk + 1;
+        int failures = 0;
+        S s;
+        bool caught = false;
+        try {
+            s.replace_with_range(0, 0,
+                                 failing_input_range(text.data(), text.data() + text.size(),
+                                                     fail_at, &failures));
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        check(caught, "replace propagates a failure past a chunk boundary");
+        check(s.empty(), "already appended chunks are cleared");
+        check(s.is_small(), "buffer is released after a failure past a chunk");
+        check_equal(std::size_t(failures), 1, "the source failed once past a chunk");
     }
 
     // A throwing iterator range constructor: the exception escapes and the

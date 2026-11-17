@@ -1414,7 +1414,7 @@ public:
         if (this == &other) {
             return *this;
         }
-        if (always_equal_alloc) {
+        if constexpr (always_equal_alloc) {
             deallocate_if_needed();
             set_states_on_move(std::move(other));
         } else if constexpr (POCMA) {

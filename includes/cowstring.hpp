@@ -427,6 +427,126 @@ auto complement(const auto& sub, const auto& base) noexcept {
     }
 }
 
+inline bool try_inplace_self_replace(std::span<const std::byte> head,
+                                     std::span<const std::byte> tail,
+                                     std::span<const std::byte> source,
+                                     std::span<std::byte> head_dest,
+                                     std::span<std::byte> tail_dest,
+                                     std::span<std::byte> source_dest) noexcept
+{
+    // Tail never overlaps with head destination
+    // Head may overlap with tail destination, but just copy head first
+    const auto strmov = [](auto src, auto dst) {
+        std::memmove(std::ranges::data(dst),
+                     std::ranges::data(src),
+                     std::ranges::size(src));
+    };
+    const bool hs = details::overlap(head_dest, source);
+    const bool sh = details::overlap(source_dest, head);
+    const bool ts = details::overlap(tail_dest, source);
+    const bool st = details::overlap(source_dest, tail);
+    if (!hs && !st) {
+        strmov(head, head_dest);
+        strmov(source, source_dest);
+        strmov(tail, tail_dest);
+        return true;
+    }
+    if (!sh && !st) {
+        strmov(source, source_dest);
+        strmov(head, head_dest);
+        strmov(tail, tail_dest);
+        return true;
+    }
+    if (!ts && !hs) {
+        strmov(head, head_dest);
+        strmov(tail, tail_dest);
+        strmov(source, source_dest);
+        return true;
+    }
+    if (sh && hs && !st) {
+        // Check if:
+        // 1. The clobbered region of source can be recovered from the moved head, or
+        // 2. The clobbered region of head can be recovered from the moved source
+        // If doable, move tail after recovering the clobbered region
+        std::span<const std::byte> clob_hs = details::overlap_region(head_dest, source);
+        const bool hs_doable = details::enclose(clob_hs, head)
+                            && details::prefix_or_suffix(clob_hs, source);
+        if (hs_doable) {
+            // Clobbered region of source by copying head
+            // can be recovered from the moved head
+            std::span<const std::byte> recover =
+                details::rebase_region(clob_hs, head, head_dest);
+            std::span<const std::byte> unaffected = details::complement(clob_hs, source);
+            std::span<std::byte> recover_dest =
+                details::rebase_region(clob_hs, source, source_dest);
+            std::span<std::byte> unaffected_dest =
+                details::rebase_region(unaffected, source, source_dest);
+            strmov(head, head_dest);
+            strmov(unaffected, unaffected_dest);
+            strmov(recover, recover_dest);
+            strmov(tail, tail_dest);
+            return true;
+        }
+        std::span<const std::byte> clob_sh = details::overlap_region(source_dest, head);
+        const bool sh_doable = details::enclose(clob_sh, source)
+                            && details::prefix_or_suffix(clob_sh, head);
+        if (sh_doable) {
+            // Clobbered region of head by copying source
+            // can be recovered from the moved source
+            std::span<const std::byte> recover =
+                details::rebase_region(clob_sh, source, source_dest);
+            std::span<const std::byte> unaffected = details::complement(clob_sh, head);
+            std::span<std::byte> recover_dest =
+                details::rebase_region(clob_sh, head, head_dest);
+            std::span<std::byte> unaffected_dest =
+                details::rebase_region(unaffected, head, head_dest);
+            strmov(source, source_dest);
+            strmov(unaffected, unaffected_dest);
+            strmov(recover, recover_dest);
+            strmov(tail, tail_dest);
+            return true;
+        }
+    }
+    if (st && ts && !hs) {
+        // Similar as previous case, but for source-tail overlap and move head first
+        std::span<const std::byte> clob_st = details::overlap_region(source_dest, tail);
+        const bool st_doable = details::enclose(clob_st, source)
+                            && details::prefix_or_suffix(clob_st, tail);
+        if (st_doable) {
+            std::span<const std::byte> recover =
+                details::rebase_region(clob_st, source, source_dest);
+            std::span<const std::byte> unaffected = details::complement(clob_st, tail);
+            std::span<std::byte> recover_dest =
+                details::rebase_region(clob_st, tail, tail_dest);
+            std::span<std::byte> unaffected_dest =
+                details::rebase_region(unaffected, tail, tail_dest);
+            strmov(head, head_dest);
+            strmov(source, source_dest);
+            strmov(unaffected, unaffected_dest);
+            strmov(recover, recover_dest);
+            return true;
+        }
+        std::span<const std::byte> clob_ts = details::overlap_region(tail_dest, source);
+        const bool ts_doable = details::enclose(clob_ts, tail)
+                            && details::prefix_or_suffix(clob_ts, source);
+        if (ts_doable) {
+            std::span<const std::byte> recover =
+                details::rebase_region(clob_ts, tail, tail_dest);
+            std::span<const std::byte> unaffected = details::complement(clob_ts, source);
+            std::span<std::byte> recover_dest =
+                details::rebase_region(clob_ts, source, source_dest);
+            std::span<std::byte> unaffected_dest =
+                details::rebase_region(unaffected, source, source_dest);
+            strmov(head, head_dest);
+            strmov(tail, tail_dest);
+            strmov(unaffected, unaffected_dest);
+            strmov(recover, recover_dest);
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace cow::details
 
 template<typename CharT, typename Allocator = std::allocator<CharT>>
@@ -777,130 +897,21 @@ private:
         std::span<char_type> head_dest(data, pos);
         std::span<char_type> tail_dest(data + pos + add_size, data + new_size);
         std::span<char_type> source_dest(data + pos, data + pos + add_size);
-        // Tail never overlaps with head destination
-        // Head may overlap with tail destination, but just copy head first
-        const auto strmov = [](auto src, auto dst) {
-            const auto* const b = std::ranges::data(src);
-            const auto* const e = std::ranges::data(src) + std::ranges::size(src);
-            std::memmove(std::ranges::data(dst), b, (e - b) * sizeof(char_type));
-        };
-        const auto reset_region = [data, new_size, this] {
+        if (details::try_inplace_self_replace(
+                std::as_bytes(head),
+                std::as_bytes(tail),
+                std::as_bytes(source),
+                std::as_writable_bytes(head_dest),
+                std::as_writable_bytes(tail_dest),
+                std::as_writable_bytes(source_dest)
+            )) {
             if (status().allocated) {
                 storage.dyn.data = data;
                 storage.dyn.size = new_size;
             } else {
                 storage.sso.size = static_cast<unsigned char>(new_size);
             }
-        };
-        const bool hs = details::overlap(head_dest, source);
-        const bool sh = details::overlap(source_dest, head);
-        const bool ts = details::overlap(tail_dest, source);
-        const bool st = details::overlap(source_dest, tail);
-        if (!hs && !st) {
-            strmov(head, head_dest);
-            strmov(source, source_dest);
-            strmov(tail, tail_dest);
-            reset_region();
             return true;
-        }
-        if (!sh && !st) {
-            strmov(source, source_dest);
-            strmov(head, head_dest);
-            strmov(tail, tail_dest);
-            reset_region();
-            return true;
-        }
-        if (!ts && !hs) {
-            strmov(head, head_dest);
-            strmov(tail, tail_dest);
-            strmov(source, source_dest);
-            reset_region();
-            return true;
-        }
-        if (sh && hs && !st) {
-            // Check if:
-            // 1. The clobbered region of source can be recovered from the moved head, or
-            // 2. The clobbered region of head can be recovered from the moved source
-            // If doable, move tail after recovering the clobbered region
-            std::span<const char_type> clob_hs = details::overlap_region(head_dest, source);
-            const bool hs_doable = details::enclose(clob_hs, head)
-                                && details::prefix_or_suffix(clob_hs, source);
-            if (hs_doable) {
-                // Clobbered region of source by copying head
-                // can be recovered from the moved head
-                std::span<const char_type> recover =
-                    details::rebase_region(clob_hs, head, head_dest);
-                std::span<const char_type> unaffected = details::complement(clob_hs, source);
-                std::span<char_type> recover_dest =
-                    details::rebase_region(clob_hs, source, source_dest);
-                std::span<char_type> unaffected_dest =
-                    details::rebase_region(unaffected, source, source_dest);
-                strmov(head, head_dest);
-                strmov(unaffected, unaffected_dest);
-                strmov(recover, recover_dest);
-                strmov(tail, tail_dest);
-                reset_region();
-                return true;
-            }
-            std::span<const char_type> clob_sh = details::overlap_region(source_dest, head);
-            const bool sh_doable = details::enclose(clob_sh, source)
-                                && details::prefix_or_suffix(clob_sh, head);
-            if (sh_doable) {
-                // Clobbered region of head by copying source
-                // can be recovered from the moved source
-                std::span<const char_type> recover =
-                    details::rebase_region(clob_sh, source, source_dest);
-                std::span<const char_type> unaffected = details::complement(clob_sh, head);
-                std::span<char_type> recover_dest =
-                    details::rebase_region(clob_sh, head, head_dest);
-                std::span<char_type> unaffected_dest =
-                    details::rebase_region(unaffected, head, head_dest);
-                strmov(source, source_dest);
-                strmov(unaffected, unaffected_dest);
-                strmov(recover, recover_dest);
-                strmov(tail, tail_dest);
-                reset_region();
-                return true;
-            }
-        }
-        if (st && ts && !hs) {
-            // Similar as previous case, but for source-tail overlap and move head first
-            std::span<const char_type> clob_st = details::overlap_region(source_dest, tail);
-            const bool st_doable = details::enclose(clob_st, source)
-                                && details::prefix_or_suffix(clob_st, tail);
-            if (st_doable) {
-                std::span<const char_type> recover =
-                    details::rebase_region(clob_st, source, source_dest);
-                std::span<const char_type> unaffected = details::complement(clob_st, tail);
-                std::span<char_type> recover_dest =
-                    details::rebase_region(clob_st, tail, tail_dest);
-                std::span<char_type> unaffected_dest =
-                    details::rebase_region(unaffected, tail, tail_dest);
-                strmov(head, head_dest);
-                strmov(source, source_dest);
-                strmov(unaffected, unaffected_dest);
-                strmov(recover, recover_dest);
-                reset_region();
-                return true;
-            }
-            std::span<const char_type> clob_ts = details::overlap_region(tail_dest, source);
-            const bool ts_doable = details::enclose(clob_ts, tail)
-                                && details::prefix_or_suffix(clob_ts, source);
-            if (ts_doable) {
-                std::span<const char_type> recover =
-                    details::rebase_region(clob_ts, tail, tail_dest);
-                std::span<const char_type> unaffected = details::complement(clob_ts, source);
-                std::span<char_type> recover_dest =
-                    details::rebase_region(clob_ts, source, source_dest);
-                std::span<char_type> unaffected_dest =
-                    details::rebase_region(unaffected, source, source_dest);
-                strmov(head, head_dest);
-                strmov(tail, tail_dest);
-                strmov(unaffected, unaffected_dest);
-                strmov(recover, recover_dest);
-                reset_region();
-                return true;
-            }
         }
         return false;
     }

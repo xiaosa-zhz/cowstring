@@ -2084,10 +2084,10 @@ struct formatter<cow::basic_cow_string<CharT, Allocator>, TargetCharT>
 template<typename CharT, typename Allocator>
 struct hash<cow::basic_cow_string<CharT, Allocator>> {
     using cow_string = cow::basic_cow_string<CharT, Allocator>;
-    using result_type = std::size_t;
+    using delegate = std::hash<typename cow_string::string_view_type>;
 
-    result_type operator()(const cow_string& str) const noexcept {
-        return std::hash<std::basic_string_view<CharT>>{}(str.view());
+    static auto operator()(const cow_string& str) noexcept {
+        return delegate{}(str.view());
     }
 };
 

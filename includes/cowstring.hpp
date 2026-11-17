@@ -1898,6 +1898,7 @@ public:
                 if (try_inplace_self_replace(pos, count, src, add_size)) {
                     return *this;
                 }
+                // May fallthrough to the next branch if self-replacement is not possible.
             }
         }
         if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {

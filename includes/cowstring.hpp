@@ -1456,7 +1456,7 @@ public:
         requires (!std::convertible_to<const StringViewLike&, const char_type*>)
     constexpr basic_cow_string& assign(const StringViewLike& sv) {
         const string_view_type view = sv;
-        return assign(view.data(), view.data() + view.size());
+        return replace(0, npos, view.data(), view.data() + view.size());
     }
 
     template<std::convertible_to<string_view_type> StringViewLike>
@@ -1466,7 +1466,7 @@ public:
     }
 
     constexpr basic_cow_string& assign(char_type ch) {
-        return assign(string_view_type(&ch, 1));
+        return replace(0, npos, &ch, &ch + 1);
     }
 
     constexpr basic_cow_string& operator=(char_type ch) {
@@ -1474,7 +1474,8 @@ public:
     }
 
     constexpr basic_cow_string& assign(std::initializer_list<char_type> il) {
-        return assign(string_view_type(il));
+        const string_view_type view(il);
+        return replace(0, npos, view.data(), view.data() + view.size());
     }
 
     constexpr basic_cow_string& operator=(std::initializer_list<char_type> il) {
@@ -1503,7 +1504,7 @@ public:
     }
 
     constexpr basic_cow_string& assign(const char_type* s, size_type count) {
-        return assign(string_view_type(s, count));
+        return replace(0, npos, s, s + count);
     }
 
     constexpr basic_cow_string& assign(const basic_cow_string& str,
@@ -1523,13 +1524,15 @@ public:
     template<std::convertible_to<string_view_type> StringViewLike>
         requires (!std::convertible_to<const StringViewLike&, const char_type*>)
     constexpr basic_cow_string& assign(const StringViewLike& sv,
-                                       size_type pos, size_type count = npos) {
-        return assign(string_view_type(sv).subview(pos, count));
+                                       size_type pos, size_type count = npos)
+    {
+        const auto view = string_view_type(sv).subview(pos, count);
+        return replace(0, npos, view.data(), view.data() + view.size());
     }
 
     template<details::container_compatible_range<char_type> R>
     constexpr basic_cow_string& assign_range(R&& r) {
-        return assign(std::ranges::begin(r), std::ranges::end(r));
+        return replace_with_range(0, npos, std::forward<R>(r));
     }
 
     constexpr void clear() noexcept {
@@ -1637,19 +1640,20 @@ public:
     basic_cow_string& append(string_view_type sv, size_type pos, size_type count = npos)
         post (exclusive())
     {
-        return append(sv.subview(pos, count));
+        const auto view = sv.subview(pos, count);
+        return replace(size(), 0, view.data(), view.data() + view.size());
     }
 
     basic_cow_string& append(string_view_type sv)
         post (exclusive())
     {
-        return append(sv.data(), sv.size());
+        return replace(size(), 0, sv.data(), sv.data() + sv.size());
     }
 
     basic_cow_string& append(const char_type* s, size_type count)
         post (exclusive())
     {
-        return append(s, s + count);
+        return replace(size(), 0, s, s + count);
     }
 
     template<typename Iter, typename Sent>
@@ -1657,13 +1661,14 @@ public:
     basic_cow_string& append(Iter iter, Sent sent)
         post (exclusive())
     {
-        return replace(size(), npos, std::move(iter), std::move(sent));
+        return replace(size(), 0, std::move(iter), std::move(sent));
     }
 
     basic_cow_string& append(std::initializer_list<char_type> il)
         post (exclusive())
     {
-        return append(string_view_type(il));
+        const string_view_type view(il);
+        return replace(size(), 0, view.data(), view.data() + view.size());
     }
 
     template<details::container_compatible_range<char_type> R>
@@ -1671,7 +1676,7 @@ public:
         post (exclusive())
     {
         // TODO: add approximately_sized_range branch when supported
-        return replace_with_range(size(), npos, std::forward<R>(r));
+        return replace_with_range(size(), 0, std::forward<R>(r));
     }
 
     basic_cow_string& operator+=(string_view_type sv)
@@ -1702,26 +1707,27 @@ public:
     basic_cow_string& insert(size_type index, char_type ch)
         post (exclusive())
     {
-        return insert(index, 1, ch);
+        return replace(index, 0, 1, ch);
     }
 
     basic_cow_string& insert(size_type index, string_view_type str)
         post (exclusive())
     {
-        return insert(index, str.data(), str.size());
+        return replace(index, 0, str.data(), str.data() + str.size());
     }
 
     basic_cow_string& insert(size_type index, string_view_type str,
                              size_type s_index, size_type count = npos)
         post (exclusive())
     {
-        return insert(index, str.subview(s_index, count));
+        const auto view = str.subview(s_index, count);
+        return replace(index, 0, view.data(), view.data() + view.size());
     }
 
     basic_cow_string& insert(size_type index, const char_type* s, size_type count)
         post (exclusive())
     {
-        return insert(index, s, s + count);
+        return replace(index, 0, s, s + count);
     }
 
     template<typename Iter, typename Sent>
@@ -1735,7 +1741,8 @@ public:
     basic_cow_string& insert(size_type index, std::initializer_list<char_type> il)
         post (exclusive())
     {
-        return insert(index, string_view_type(il));
+        const string_view_type view(il);
+        return replace(index, 0, view.data(), view.data() + view.size());
     }
 
     iterator insert(const_iterator pos, size_type count, char_type ch)
@@ -1743,7 +1750,7 @@ public:
         post (exclusive())
     {
         const size_type index = pos - cbegin();
-        insert(index, count, ch);
+        replace(index, 0, count, ch);
         return begin() + index;
     }
 
@@ -1751,7 +1758,9 @@ public:
         pre (is_my_iter(pos))
         post (exclusive())
     {
-        return insert(pos, 1, ch);
+        const size_type index = pos - cbegin();
+        replace(index, 0, 1, ch);
+        return begin() + index;
     }
 
     template<typename Iter, typename Sent>
@@ -1761,7 +1770,7 @@ public:
         post (exclusive())
     {
         const size_type index = pos - cbegin();
-        insert(index, std::move(iter), std::move(sent));
+        replace(index, 0, std::move(iter), std::move(sent));
         return begin() + index;
     }
 
@@ -1769,8 +1778,10 @@ public:
         pre (is_my_iter(pos))
         post (exclusive())
     {
-        string_view_type sv(il);
-        return insert(pos, sv.data(), sv.data() + sv.size());
+        const string_view_type sv(il);
+        const size_type index = pos - cbegin();
+        replace(index, 0, sv.data(), sv.data() + sv.size());
+        return begin() + index;
     }
 
     template<details::container_compatible_range<char_type> R>
@@ -1780,7 +1791,7 @@ public:
     {
         // Transfer iterator to index eagerly to avoid issues if r is the current object.
         const size_type index = pos - cbegin();
-        insert(index, std::ranges::begin(r), std::ranges::end(r));
+        replace_with_range(index, 0, std::forward<R>(r));
         return begin() + index;
     }
 
@@ -1815,13 +1826,14 @@ public:
                               size_type pos2, size_type count2 = npos)
         post (exclusive())
     {
-        return replace(pos, count, str.subview(pos2, count2));
+        const auto view = str.subview(pos2, count2);
+        return replace(pos, count, view.data(), view.data() + view.size());
     }
 
     basic_cow_string& replace(size_type pos, size_type count, string_view_type str)
         post (exclusive())
     {
-        return replace(pos, count, str.data(), str.size());
+        return replace(pos, count, str.data(), str.data() + str.size());
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last, string_view_type str)
@@ -1831,7 +1843,7 @@ public:
     {
         const size_type index = first - cbegin();
         const size_type count = last - first;
-        return replace(index, count, str);
+        return replace(index, count, str.data(), str.data() + str.size());
     }
 
     basic_cow_string& replace(size_type pos, size_type count,
@@ -1845,7 +1857,9 @@ public:
                               const char_type* cstr, size_type count2)
         post (exclusive())
     {
-        return replace(first, last, cstr, cstr + count2);
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, cstr, cstr + count2);
     }
 
     basic_cow_string& replace(size_type pos, size_type count, size_type count2, char_type ch)
@@ -1961,7 +1975,8 @@ public:
                               std::initializer_list<char_type> il)
         post (exclusive())
     {
-        return replace(pos, count, string_view_type(il));
+        const string_view_type view(il);
+        return replace(pos, count, view.data(), view.data() + view.size());
     }
 
     basic_cow_string& replace(const_iterator first, const_iterator last,
@@ -1970,7 +1985,10 @@ public:
         pre (first <= last)
         post (exclusive())
     {
-        return replace(first, last, string_view_type(il));
+        const string_view_type view(il);
+        const size_type index = first - cbegin();
+        const size_type count = last - first;
+        return replace(index, count, view.data(), view.data() + view.size());
     }
 
     template<details::container_compatible_range<char_type> R>

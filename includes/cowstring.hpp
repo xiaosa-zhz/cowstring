@@ -716,10 +716,9 @@ private:
             storage.dyn.data = subview.data();
             storage.dyn.size = subview.size();
             ref_count().fetch_add(1, std::memory_order_relaxed);
-        } else if (s.shared) {
-            assign_static_string(subview);
         } else {
-            write_sso(subview);
+            contract_assert(s == details::literal);
+            assign_static_string(subview);
         }
     }
 
@@ -737,10 +736,9 @@ private:
             storage.dyn.size = subview.size();
             std::start_lifetime(other.storage.sso);
             other.storage.sso = {};
-        } else if (s.shared) {
-            assign_static_string(subview);
         } else {
-            write_sso(subview);
+            contract_assert(s == details::literal);
+            assign_static_string(subview);
         }
     }
 

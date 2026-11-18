@@ -902,8 +902,8 @@ private:
         }
     }
 
-    bool try_inplace_self_replace(const size_type pos, const size_type count,
-                                  const char_type* const src, const size_type add_size)
+    bool try_inplace_self_replace(size_type pos, size_type count,
+                                  const char_type* src, size_type add_size)
     {
         if (!exclusive()) {
             return false;
@@ -1944,13 +1944,14 @@ public:
                 std::ranges::copy_n(data, add_size, storage.data() + pos);
                 return *this;
             } else {
-                auto r = [&] {
+                auto r = [&iter, add_size] {
                     if constexpr (std::random_access_iterator<Iter>) {
                         return std::ranges::subrange(iter, iter + add_size);
                     } else {
                         return std::ranges::subrange(
                             std::counted_iterator(std::move(iter), add_size),
-                            std::default_sentinel);
+                            std::default_sentinel
+                        );
                     }
                 }();
                 static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);

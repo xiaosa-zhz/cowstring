@@ -14,10 +14,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <forward_list>
 #include <functional>
 #include <iterator>
 #include <print>
 #include <ranges>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -481,6 +483,105 @@ void test_replace_overloads() {
     }
 }
 
+// ---------------------------------------- iterator / sentinel pair overloads
+// Every interface that takes an iterator/sentinel pair has to decide how to
+// consume it. The pairs below all describe the same three characters, "xyz",
+// but each one selects a different path:
+//
+//   string-like : contiguous, pointer convertible to const char *
+//                 -> handed to the pointer overload, no buffer involved
+//   foreign     : contiguous, but the pointer is not const char *
+//                 -> buffered, although it is contiguous
+//   forward     : forward iterator whose sentinel does not know the distance
+//                 -> the distance is walked, then buffered
+//   counted     : input iterator whose sentinel does know the distance
+//                 -> the distance comes from the sentinel, then buffered
+//   input       : plain single pass input iterator
+//                 -> appended a chunk at a time
+enum class shape { string_like, foreign, forward, counted, input };
+
+template<shape Shape, typename Fn>
+void with_source(std::string_view name, Fn&& fn) {
+    if constexpr (Shape == shape::string_like) {
+        static constexpr std::array<char, 3> data{'x', 'y', 'z'};
+        fn(data.begin(), data.end(), name);
+    } else if constexpr (Shape == shape::foreign) {
+        static constexpr std::array<unsigned char, 3> data{'x', 'y', 'z'};
+        fn(data.begin(), data.end(), name);
+    } else if constexpr (Shape == shape::forward) {
+        static const std::forward_list<char> data{'x', 'y', 'z'};
+        fn(data.begin(), data.end(), name);
+    } else if constexpr (Shape == shape::counted) {
+        std::istringstream stream("xyz");
+        fn(std::counted_iterator(std::istreambuf_iterator<char>(stream), 3),
+           std::default_sentinel, name);
+    } else {
+        std::istringstream stream("xyz");
+        fn(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>{}, name);
+    }
+}
+
+template<typename Fn>
+void for_each_shape(Fn&& fn) {
+    with_source<shape::string_like>("string-like iterator", fn);
+    with_source<shape::foreign>("foreign contiguous iterator", fn);
+    with_source<shape::forward>("forward iterator", fn);
+    with_source<shape::counted>("counted input iterator", fn);
+    with_source<shape::input>("plain input iterator", fn);
+}
+
+void test_iterator_shape_overloads() {
+    // Constructor from an iterator range.
+    for_each_shape([](auto first, auto last, std::string_view shape) {
+        const S s(first, last);
+        check(s.view() == SV("xyz"), std::format("ctor(iter, sent) from {}", shape));
+    });
+
+    // assign(iter, sent)
+    for_each_shape([](auto first, auto last, std::string_view shape) {
+        S s("12345");
+        s.assign(first, last);
+        check(s.view() == SV("xyz"), std::format("assign(iter, sent) from {}", shape));
+    });
+
+    // append(iter, sent)
+    for_each_shape([](auto first, auto last, std::string_view shape) {
+        S s("abc");
+        s.append(first, last);
+        check(s.view() == SV("abcxyz"), std::format("append(iter, sent) from {}", shape));
+    });
+
+    // insert(size_type, iter, sent)
+    for_each_shape([](auto first, auto last, std::string_view shape) {
+        S s("abc");
+        s.insert(1, first, last);
+        check(s.view() == SV("axyzbc"), std::format("insert(pos, iter, sent) from {}", shape));
+    });
+
+    // insert(const_iterator, iter, sent)
+    for_each_shape([](auto first, auto last, std::string_view shape) {
+        S s("abc");
+        s.insert(s.cbegin() + 1, first, last);
+        check(s.view() == SV("axyzbc"), std::format("insert(iterator, iter, sent) from {}", shape));
+    });
+
+    // replace(size_type, size_type, iter, sent)
+    for_each_shape([](auto first, auto last, std::string_view shape) {
+        S s("abc");
+        s.replace(1, 1, first, last);
+        check(s.view() == SV("axyzc"),
+              std::format("replace(pos, count, iter, sent) from {}", shape));
+    });
+
+    // replace(const_iterator, const_iterator, iter, sent)
+    for_each_shape([](auto first, auto last, std::string_view shape) {
+        S s("abc");
+        s.replace(s.cbegin() + 1, s.cbegin() + 2, first, last);
+        check(s.view() == SV("axyzc"),
+              std::format("replace(iterator, iterator, iter, sent) from {}", shape));
+    });
+}
+
 // ------------------------------------------------------------ free functions
 void test_free_functions() {
     const S left("ab");
@@ -539,6 +640,7 @@ int main() {
     test_assignment();
     test_modifiers();
     test_replace_overloads();
+    test_iterator_shape_overloads();
     test_free_functions();
 
     if (failures != 0) {

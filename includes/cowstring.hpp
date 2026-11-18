@@ -286,6 +286,10 @@ template<typename R, typename CharT>
 concept container_compatible_range = std::ranges::input_range<R>
     && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
 
+template<typename Iter, typename CharT>
+concept string_like_iter = std::contiguous_iterator<Iter>
+    && std::convertible_to<typename std::iterator_traits<Iter>::pointer, const CharT*>;
+
 // In std::string, some interfaces take null-terminated string
 // as argument. This facility only accepts string literals
 // known at compile time for corresponding APIs.
@@ -960,9 +964,7 @@ public:
         : basic_cow_string(alloc)
     {
         if consteval {
-            write_static_string(
-                std::ranges::subrange(std::move(iter), std::move(sent))
-            );
+            write_static_string(std::ranges::subrange(std::move(iter), std::move(sent)));
         } else {
             append(std::move(iter), std::move(sent));
         }
@@ -1488,7 +1490,13 @@ public:
             write_static_string(std::move(r));
             return *this;
         } else {
-            return replace(0, npos, std::move(iter), std::move(sent));
+            if constexpr (details::string_like_iter<Iter, char_type>) {
+                const char_type* const data = std::to_address(iter);
+                const auto length = std::ranges::distance(iter, sent);
+                return replace(0, npos, data, data + length);
+            } else {
+                return replace(0, npos, std::move(iter), std::move(sent));
+            }
         }
     }
 
@@ -1659,7 +1667,13 @@ public:
     basic_cow_string& append(Iter iter, Sent sent)
         post (exclusive())
     {
-        return replace(size(), 0, std::move(iter), std::move(sent));
+        if constexpr (details::string_like_iter<Iter, char_type>) {
+            const char_type* const data = std::to_address(iter);
+            const auto length = std::ranges::distance(iter, sent);
+            return replace(size(), 0, data, data + length);
+        } else {
+            return replace(size(), 0, std::move(iter), std::move(sent));
+        }
     }
 
     basic_cow_string& append(std::initializer_list<char_type> il)
@@ -1733,7 +1747,13 @@ public:
     basic_cow_string& insert(size_type index, Iter iter, Sent sent)
         post (exclusive())
     {
-        return replace(index, 0, std::move(iter), std::move(sent));
+        if constexpr (details::string_like_iter<Iter, char_type>) {
+            const char_type* const data = std::to_address(iter);
+            const auto length = std::ranges::distance(iter, sent);
+            return replace(index, 0, data, data + length);
+        } else {
+            return replace(index, 0, std::move(iter), std::move(sent));
+        }
     }
 
     basic_cow_string& insert(size_type index, std::initializer_list<char_type> il)
@@ -1768,7 +1788,13 @@ public:
         post (exclusive())
     {
         const size_type index = pos - cbegin();
-        replace(index, 0, std::move(iter), std::move(sent));
+        if constexpr (details::string_like_iter<Iter, char_type>) {
+            const char_type* const data = std::to_address(iter);
+            const auto length = std::ranges::distance(iter, sent);
+            replace(index, 0, data, data + length);
+        } else {
+            replace(index, 0, std::move(iter), std::move(sent));
+        }
         return begin() + index;
     }
 
@@ -1886,20 +1912,18 @@ public:
         post (exclusive())
     {
         check_pos(pos);
-        if constexpr (std::contiguous_iterator<Iter>) {
+        if constexpr (details::string_like_iter<Iter, char_type>) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            const auto* const src = std::to_address(iter);
-            if constexpr (std::convertible_to<decltype(src), const char_type*>) {
-                if (!storage.self_alias(src)) {
-                    adjust_old_for_replace(pos, count, add_size);
-                    std::ranges::copy_n(src, add_size, storage.data() + pos);
-                    return *this;
-                }
-                if (try_inplace_self_replace(pos, count, src, add_size)) {
-                    return *this;
-                }
-                // May fallthrough to the next branch if self-replacement is not possible.
+            const char_type* const src = std::to_address(iter);
+            if (!storage.self_alias(src)) {
+                adjust_old_for_replace(pos, count, add_size);
+                std::ranges::copy_n(src, add_size, storage.data() + pos);
+                return *this;
             }
+            if (try_inplace_self_replace(pos, count, src, add_size)) {
+                return *this;
+            }
+            // May fallthrough to the next branch if self-replacement is not possible.
         }
         static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
         using small_buffer = std::inplace_vector<char_type, static_buffer_max>;
@@ -1960,7 +1984,13 @@ public:
     {
         const size_type index = first - cbegin();
         const size_type count = last - first;
-        return replace(index, count, std::move(iter), std::move(sent));
+        if constexpr (details::string_like_iter<Iter, char_type>) {
+            const char_type* const data = std::to_address(iter);
+            const auto length = std::ranges::distance(iter, sent);
+            return replace(index, count, data, data + length);
+        } else {
+            return replace(index, count, std::move(iter), std::move(sent));
+        }
     }
 
     basic_cow_string& replace(size_type pos, size_type count,

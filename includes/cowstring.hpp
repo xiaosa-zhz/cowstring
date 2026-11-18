@@ -1956,12 +1956,12 @@ public:
                 static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
                 if (add_size < static_buffer_max) {
                     // Make stack buffer separate stack frame.
-                    return [this, pos, count](auto r) -> basic_cow_string& {
+                    return [this](this auto, size_type pos, size_type count, auto r) -> auto& {
                         using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
                         buffer_type buffer(std::from_range, std::move(r));
                         const char_type* const data = buffer.data();
                         return replace(pos, count, data, data + buffer.size());
-                    }(std::move(r));
+                    }(pos, count, std::move(r));
                 } else {
                     string_type cp(std::from_range, std::move(r), get_allocator());
                     const char_type* const data = cp.data();

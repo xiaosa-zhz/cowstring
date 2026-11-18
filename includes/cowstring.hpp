@@ -2112,7 +2112,7 @@ basic_cow_string(const S&,
 template<std::ranges::input_range R,
          class Alloc = std::allocator<std::remove_cv_t<std::ranges::range_value_t<R>>>>
 basic_cow_string(std::from_range_t, R&&, Alloc = Alloc())
-    -> basic_cow_string<std::ranges::range_value_t<R>, Alloc>;
+    -> basic_cow_string<std::remove_cv_t<std::ranges::range_value_t<R>>, Alloc>;
 
 template<typename CharT, typename Allocator, typename COWString = basic_cow_string<CharT, Allocator>>
 constexpr COWString operator+(basic_cow_string<CharT, Allocator> lhs,

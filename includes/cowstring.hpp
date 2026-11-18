@@ -1972,7 +1972,7 @@ public:
                     );
                 }
             }();
-            static constexpr std::size_t static_buffer_max = 2048 / sizeof(char_type);
+            static constexpr std::size_t static_buffer_max = (1024 + 512) / sizeof(char_type);
             if (add_size <= static_buffer_max) {
                 // Make stack buffer separate stack frame.
                 return [this](this auto, size_type pos, size_type count, auto r) -> auto& {

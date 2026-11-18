@@ -1701,7 +1701,6 @@ public:
     basic_cow_string& append_range(R&& r)
         post (exclusive())
     {
-        // TODO: add approximately_sized_range branch when supported
         return replace_with_range(size(), 0, std::forward<R>(r));
     }
 
@@ -2062,8 +2061,23 @@ public:
     basic_cow_string& replace_with_range(size_type pos, size_type count, R&& r)
         post (exclusive())
     {
-        // TODO: Add approximately_sized_range support
-        return replace(pos, count, std::ranges::begin(r), std::ranges::end(r));
+        // TODO: Add approximately_sized_range support when vendor has it.
+        if constexpr (std::ranges::contiguous_range<R>) {
+            const auto* const data = std::ranges::data(r);
+            const auto length = std::ranges::distance(r);
+            return replace(pos, count, data, data + length);
+        } else if constexpr (std::ranges::sized_range<R>) {
+            const auto size = std::ranges::size(r);
+            if constexpr (std::ranges::random_access_range<R>) {
+                const auto iter = std::ranges::begin(r);
+                return replace(pos, count, iter, iter + size);
+            } else {
+                std::counted_iterator iter(std::ranges::begin(r), size);
+                return replace(pos, count, std::move(iter), std::default_sentinel);
+            }
+        } else {
+            return replace(pos, count, std::ranges::begin(r), std::ranges::end(r));
+        }
     }
 
     template<details::container_compatible_range<char_type> R>

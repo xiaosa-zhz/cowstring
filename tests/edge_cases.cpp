@@ -17,16 +17,20 @@
 
 #include <atomic>
 #include <cstddef>
+#include <deque>
+#include <forward_list>
 #include <iterator>
 #include <list>
 #include <memory>
 #include <print>
+#include <ranges>
 #include <sstream>
 #include <generator>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -57,7 +61,7 @@ using SV = std::string_view;
 //     buffer of stack_buffer_max characters (when the receiver is not empty);
 //   * the single-pass input branch flushes a smaller cache in chunks.
 // The sizes below are chosen to land on, and just past, those boundaries.
-constexpr std::size_t stack_buffer_max = 2048 / sizeof(S::value_type);
+constexpr std::size_t stack_buffer_max = (1024 + 512) / sizeof(S::value_type);
 constexpr std::size_t input_cache_max = 128 / sizeof(S::value_type);
 
 // ---------------------------------------------------------------------------
@@ -731,6 +735,174 @@ void test_replace_empty_small_fast_path() {
 }
 
 // ---------------------------------------------------------------------------
+// Shapes that pin down the dispatch in replace_with_range():
+//   * contiguous_range      -> pointer overload, no intermediate buffer;
+//   * sized + random access -> begin, begin + size;
+//   * sized otherwise       -> counted_iterator, so no extra distance walk;
+//   * unsized               -> plain begin/end.
+//
+// sized_input_range is sized but its iterator is input-only, so it must take
+// the counted branch rather than the forward one. contiguous_unsized_range is
+// contiguous but its sentinel cannot be subtracted, so the contiguous branch
+// has to fall back to ranges::distance().
+struct sized_input_range {
+    const char* first;
+    std::size_t count;
+
+    struct iterator {
+        using iterator_concept = std::input_iterator_tag;
+        using value_type = char;
+        using difference_type = std::ptrdiff_t;
+
+        const char* cur = nullptr;
+
+        char operator*() const { return *cur; }
+        iterator& operator++() { ++cur; return *this; }
+        iterator operator++(int) { auto old = *this; ++cur; return old; }
+        friend bool operator==(const iterator&, const iterator&) = default;
+    };
+
+    iterator begin() const { return {first}; }
+    iterator end() const { return {first + count}; }
+    std::size_t size() const { return count; }
+};
+
+struct contiguous_unsized_sentinel {
+    const char* end = nullptr;
+
+    friend bool operator==(const char* ptr, contiguous_unsized_sentinel sent) {
+        return ptr == sent.end;
+    }
+};
+
+struct contiguous_unsized_range {
+    const char* first;
+    const char* last;
+
+    const char* begin() const { return first; }
+    contiguous_unsized_sentinel end() const { return {last}; }
+};
+
+// Feeds a fresh range through every range-taking entry point. make() is called
+// once per API so single-pass sources are never reused.
+template<typename Make>
+void check_range_shape(std::string_view name, Make make, SV expected) {
+    const std::string text(expected);
+
+    S built(std::from_range, make());
+    check(built.view() == expected, std::string(name) + ": ctor(from_range)");
+
+    S assigned("xyz");
+    assigned.assign_range(make());
+    check(assigned.view() == expected, std::string(name) + ": assign_range");
+
+    S appended("xyz");
+    appended.append_range(make());
+    check(appended.view() == SV("xyz" + text), std::string(name) + ": append_range");
+
+    S inserted("xyz");
+    inserted.insert_range(inserted.begin() + 1, make());
+    check(inserted.view() == SV("x" + text + "yz"), std::string(name) + ": insert_range");
+
+    S replaced("xyz");
+    replaced.replace_with_range(1, 1, make());
+    check(replaced.view() == SV("x" + text + "z"),
+          std::string(name) + ": replace_with_range");
+}
+
+void test_range_dispatch_shapes() {
+    check_range_shape("deque", [] { return std::deque<char>{'a', 'b', 'c'}; }, SV("abc"));
+    check_range_shape("list", [] { return std::list<char>{'a', 'b', 'c'}; }, SV("abc"));
+    check_range_shape("forward_list",
+                      [] { return std::forward_list<char>{'a', 'b', 'c'}; }, SV("abc"));
+
+    const std::string text = "abcdef";
+    check_range_shape("sized input",
+                      [&] { return sized_input_range{text.data(), text.size()}; },
+                      SV("abcdef"));
+    check_range_shape("contiguous unsized",
+                      [&] {
+                          return contiguous_unsized_range{text.data(),
+                                                          text.data() + text.size()};
+                      },
+                      SV("abcdef"));
+
+    // A const lvalue range must go through the same dispatch.
+    {
+        const std::list<char> source{'a', 'b', 'c'};
+        S s(std::from_range, source);
+        check(s.view() == SV("abc"), "ctor(from_range) from a const list");
+        s.append_range(source);
+        check(s.view() == SV("abcabc"), "append_range from a const list");
+    }
+
+    // Larger than the stack buffer: non-contiguous branches materialise into a
+    // temporary string, the contiguous branch copies through its pointer.
+    {
+        const std::list<char> big(stack_buffer_max + 1, 'q');
+        S s("ab");
+        s.append_range(big);
+        check(s.view() == SV("ab" + std::string(big.size(), 'q')),
+              "large list append_range");
+    }
+    {
+        const std::deque<char> big(stack_buffer_max + 1, 'd');
+        S s("ab");
+        s.replace_with_range(1, 1, big);
+        check(s.view() == SV("a" + std::string(big.size(), 'd')),
+              "large deque replace_with_range");
+    }
+    {
+        const std::vector<char> big(stack_buffer_max + 1, 'v');
+        S s("ab");
+        s.append_range(big);
+        check(s.view() == SV("ab" + std::string(big.size(), 'v')),
+              "large vector append_range");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The range-taking entry points capture their position before forwarding the
+// range, so a range that refers to the receiver itself must still work.
+void test_range_self_alias() {
+    {
+        S s("abcdef");
+        s.append_range(s);
+        check(s.view() == SV("abcdefabcdef"), "append_range(self)");
+    }
+    {
+        S s("abcdef");
+        const auto inserted = s.insert_range(s.begin() + 2, s);
+        check(s.view() == SV("ababcdefcdef"), "insert_range(self)");
+        check(std::string(inserted, inserted + 6) == "abcdef",
+              "insert_range(self) return");
+    }
+    {
+        S s("abcdef");
+        s.assign_range(s);
+        check(s.view() == SV("abcdef"), "assign_range(self)");
+    }
+    {
+        S s("abcdef");
+        s.replace_with_range(2, 1, s);
+        check(s.view() == SV("ababcdefdef"), "replace_with_range(self)");
+    }
+    {
+        S s;
+        s.append_range(s);
+        s.insert_range(s.begin(), s);
+        check(s.empty() && s.is_small(), "empty self range operations");
+    }
+    {
+        // A non-contiguous view over the receiver has to be materialised before
+        // the destination storage is touched.
+        S s("abcdef");
+        s.append_range(std::views::reverse(s));
+        check(s.view() == SV("abcdeffedcba"), "append_range(reverse(self))");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // operator+ tries the left operand, then the right operand, then falls back to
 // appending into the left one.
 void test_operator_plus_paths() {
@@ -834,6 +1006,8 @@ int main() {
     test_large_noncontiguous_replace();
     test_replace_single_pass_empty();
     test_replace_empty_small_fast_path();
+    test_range_dispatch_shapes();
+    test_range_self_alias();
     test_replace_throw_in_source();
     test_operator_plus_paths();
     test_shrink_to_fit_no_slack();

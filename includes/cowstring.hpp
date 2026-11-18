@@ -1936,8 +1936,6 @@ public:
             }
             // May fallthrough to the next branch if self-replacement is not possible.
         }
-        static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
-        using small_buffer = std::inplace_vector<char_type, static_buffer_max>;
         if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
             if constexpr (details::can_direct_replace<Iter, char_type>()) {
@@ -1950,8 +1948,9 @@ public:
                     std::counted_iterator(std::move(iter), add_size),
                     std::default_sentinel
                 };
+                static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
                 if (add_size < static_buffer_max) {
-                    small_buffer buffer(std::from_range, std::move(r));
+                    std::inplace_vector<char_type, static_buffer_max> buffer(std::from_range, std::move(r));
                     const char_type* const data = buffer.data();
                     return replace(pos, count, data, data + buffer.size());
                 } else {
@@ -1966,7 +1965,9 @@ public:
                 // no one could alias with a empty string anyway.
                 // This branch is mostly for constructors.
                 try {
-                    small_buffer buffer;
+                    // Smaller buffer to inline
+                    static constexpr std::size_t input_cache_max = 128 / sizeof(char_type);
+                    std::inplace_vector<char_type, input_cache_max> buffer;
                     while (iter != sent) {
                         buffer.push_back(*iter);
                         if (buffer.size() == buffer.capacity()) {

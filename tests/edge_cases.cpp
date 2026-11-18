@@ -52,11 +52,13 @@ void check_equal(std::size_t got, std::size_t want, std::string_view what) {
 using S = cow::cow_string;
 using SV = std::string_view;
 
-// Mirrors the stack buffer that replace() uses for every non-contiguous source:
-// both the sized/forward branch (which materialises into it in one go) and the
-// single pass branch (which flushes it in chunks) share this size. The sizes
-// below are chosen to land on, and just past, that boundary.
-constexpr std::size_t stack_buffer_max = 1024 / sizeof(S::value_type);
+// Mirrors the two buffers that replace() uses for non-contiguous sources:
+//   * the sized/forward branch materialises the whole source into one stack
+//     buffer of stack_buffer_max characters (when the receiver is not empty);
+//   * the single-pass input branch flushes a smaller cache in chunks.
+// The sizes below are chosen to land on, and just past, those boundaries.
+constexpr std::size_t stack_buffer_max = 2048 / sizeof(S::value_type);
+constexpr std::size_t input_cache_max = 128 / sizeof(S::value_type);
 
 // ---------------------------------------------------------------------------
 // Moving from a literal with a position/count has no allocation to steal, so
@@ -445,7 +447,7 @@ void test_large_noncontiguous_replace() {
     check(buffered.view() == SV(std::string(stack_buffer_max - 1, 'b') + std::string(10, 'a')),
           "buffered non-contiguous replace contents");
 
-    // Exactly one buffer worth of characters no longer fits.
+    // Exactly one buffer worth still fits: the branch compares with <=.
     const std::list<char> at_limit(stack_buffer_max, 'c');
     S at_limit_target(10, 'a');
     at_limit_target.reserve(room);
@@ -455,13 +457,13 @@ void test_large_noncontiguous_replace() {
     check(at_limit_target.view() == SV(std::string(stack_buffer_max, 'c') + std::string(10, 'a')),
           "at-limit non-contiguous replace contents");
 
-    // Beyond the limit: the source goes through a temporary cow_string.
-    const std::list<char> beyond(2 * stack_buffer_max, 'd');
+    // One past the limit: the source goes through a temporary cow_string.
+    const std::list<char> beyond(stack_buffer_max + 1, 'd');
     S large(10, 'a');
     large.reserve(room);
     large.replace(0, 0, beyond.begin(), beyond.end());
-    check_equal(large.size(), 2 * stack_buffer_max + 10, "large non-contiguous replace size");
-    check(large.view() == SV(std::string(2 * stack_buffer_max, 'd') + std::string(10, 'a')),
+    check_equal(large.size(), stack_buffer_max + 11, "large non-contiguous replace size");
+    check(large.view() == SV(std::string(stack_buffer_max + 1, 'd') + std::string(10, 'a')),
           "large non-contiguous replace contents");
 
     // A shared receiver cannot be written in place, so the replacement detaches
@@ -495,6 +497,44 @@ std::generator<char> failing_input_range(const char* begin, const char* end, con
     }
 }
 
+// A multipass (forward) source whose dereference throws at a chosen position.
+// Unlike failing_input_range() (a generator, i.e. an input range), this one
+// takes the sized/forward branch of replace().
+struct throwing_forward_iterator {
+    using iterator_concept = std::forward_iterator_tag;
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = char;
+    using difference_type = std::ptrdiff_t;
+
+    const char* cur = nullptr;
+    const char* fail_at = nullptr;
+    int* failures = nullptr;
+
+    char operator*() const {
+        if (cur == fail_at) {
+            ++*failures;
+            throw std::runtime_error("source read failed");
+        }
+        return *cur;
+    }
+
+    throwing_forward_iterator& operator++() {
+        ++cur;
+        return *this;
+    }
+
+    throwing_forward_iterator operator++(int) {
+        auto old = *this;
+        ++cur;
+        return old;
+    }
+
+    friend bool operator==(const throwing_forward_iterator& lhs,
+                           const throwing_forward_iterator& rhs) {
+        return lhs.cur == rhs.cur;
+    }
+};
+
 void test_replace_single_pass_empty() {
     // Success path: an empty receiver is filled directly, without a temporary.
     // istreambuf_iterator is a plain single pass input iterator and, unlike
@@ -518,7 +558,7 @@ void test_replace_single_pass_empty() {
 
     // Just below one buffer: it grows past the small string and is only handed
     // over once the source is exhausted, so no intermediate flush happens.
-    const std::string below_limit(stack_buffer_max - 1, 'g');
+    const std::string below_limit(input_cache_max - 1, 'g');
     std::istringstream long_input(below_limit);
     S grown(std::istreambuf_iterator<char>(long_input), std::istreambuf_iterator<char>{});
     check(grown.view() == SV(below_limit), "single pass source just below the buffer limit");
@@ -526,7 +566,7 @@ void test_replace_single_pass_empty() {
 
     // Source larger than one buffer: the buffer has to be flushed while reading,
     // and the tail left over is flushed once the source is exhausted.
-    const std::string bulk(3 * stack_buffer_max + 7, 'b');
+    const std::string bulk(3 * input_cache_max + 7, 'b');
     std::istringstream bulk_input(bulk);
     S from_bulk(std::istreambuf_iterator<char>(bulk_input), std::istreambuf_iterator<char>{});
     check(from_bulk.view() == SV(bulk), "single pass source spanning several chunks");
@@ -534,7 +574,7 @@ void test_replace_single_pass_empty() {
 
     // An exact multiple of the chunk size leaves the buffer empty at the end,
     // so the final flush is skipped.
-    const std::string exact(2 * stack_buffer_max, 'c');
+    const std::string exact(2 * input_cache_max, 'c');
     std::istringstream exact_input(exact);
     S from_exact(std::istreambuf_iterator<char>(exact_input), std::istreambuf_iterator<char>{});
     check(from_exact.view() == SV(exact), "single pass source on a chunk boundary");
@@ -595,8 +635,8 @@ void test_replace_throw_in_source() {
     // The read fails only after whole chunks have already been handed over to
     // the string, so the cleanup has to drop those as well.
     {
-        const std::string text(3 * stack_buffer_max + 9, 'w');
-        const char* const fail_at = text.data() + 2 * stack_buffer_max + 1;
+        const std::string text(3 * input_cache_max + 9, 'w');
+        const char* const fail_at = text.data() + 2 * input_cache_max + 1;
         int failures = 0;
         S s;
         bool caught = false;
@@ -627,6 +667,66 @@ void test_replace_throw_in_source() {
         }
         check(caught, "iterator constructor propagates a source failure");
         check_equal(std::size_t(failures), 1, "the constructor source failed once");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The empty-small fast path of replace(): when the receiver holds nothing, a
+// sized/forward source is written straight into the freshly sized storage.
+// Nothing can alias an empty string, so the stack buffer and the temporary
+// materialisation are skipped even for sources larger than the stack buffer.
+void test_replace_empty_small_fast_path() {
+    // Forward (non-sized) source: the distance is walked, then copied directly.
+    {
+        const std::list<char> source(40, 'f');
+        S s;
+        check(s.is_small() && s.empty(), "empty fast path starts small and empty");
+        s.replace(0, 0, source.begin(), source.end());
+        check(s.view() == SV(std::string(40, 'f')), "empty receiver fills from a forward range");
+        check(s.exclusive(), "empty receiver is exclusive after the fill");
+    }
+
+    // An empty source leaves the receiver untouched.
+    {
+        const std::list<char> none;
+        S s;
+        s.replace(0, 0, none.begin(), none.end());
+        check(s.empty() && s.is_small(), "empty forward source leaves the receiver empty");
+        check(s.exclusive(), "empty forward source keeps the receiver exclusive");
+    }
+
+    // Larger than the stack buffer: no temporary string, the empty receiver is
+    // resized once and the source is copied straight in.
+    {
+        const std::list<char> huge(2 * stack_buffer_max + 5, 'h');
+        S s;
+        s.replace(0, 0, huge.begin(), huge.end());
+        check_equal(s.size(), huge.size(), "empty receiver takes a large forward source");
+        check(s.is_owned(), "large empty fast path allocates");
+        check(s.view() == SV(std::string(huge.size(), 'h')),
+              "large empty fast path contents");
+    }
+
+    // A source failure midway through the direct copy has to roll the receiver
+    // back and release the buffer that adjust_old_for_replace() just grew.
+    {
+        const std::string text(200, 't');
+        int failures = 0;
+        S s;
+        bool caught = false;
+        try {
+            s.replace(0, 0,
+                      throwing_forward_iterator{text.data(), text.data() + 150, &failures},
+                      throwing_forward_iterator{text.data() + text.size(), nullptr, &failures});
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        check(caught, "forward source failure propagates");
+        check(s.empty(), "partial forward characters are cleared");
+        check(s.is_small(), "forward source failure releases the grown buffer");
+        check_equal(std::size_t(failures), 1, "the forward source failed once");
+        s.push_back('z');
+        check(s.view() == SV("z"), "receiver is reusable after a forward source failure");
     }
 }
 
@@ -733,6 +833,7 @@ int main() {
     test_allocator_mismatch();
     test_large_noncontiguous_replace();
     test_replace_single_pass_empty();
+    test_replace_empty_small_fast_path();
     test_replace_throw_in_source();
     test_operator_plus_paths();
     test_shrink_to_fit_no_slack();

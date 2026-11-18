@@ -222,7 +222,7 @@ union storage {
         return control()->ref_count;
     }
 
-    bool self_alias(const CharT* ptr) const noexcept {
+    bool self_alias(const void* ptr) const noexcept {
         static constexpr std::less_equal<void> le = {};
         const auto s = status();
         if (s == literal) {
@@ -295,7 +295,10 @@ consteval bool can_direct_replace() noexcept {
     if constexpr (std::contiguous_iterator<Iter>) {
         using pointer = std::iterator_traits<Iter>::pointer;
         using pointee = std::remove_cv_t<std::remove_pointer_t<pointer>>;
-        return !std::is_class_v<pointee> && !std::same_as<pointee, CharT>;
+        // Exclude magic types that can alias with anything.
+        return !std::is_class_v<pointee> && !std::is_same_v<pointee, CharT>
+            && !std::is_same_v<pointee, char> && !std::is_same_v<pointee, unsigned char>
+            && !std::is_same_v<pointee, std::byte>;
     } else {
         return false;
     }
@@ -1937,9 +1940,11 @@ public:
             }
         } else if constexpr (details::can_direct_replace<Iter, char_type>()) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            const auto* const data = std::to_address(iter);
+            const auto* const src = std::to_address(iter);
+            // If someone break strick aliasing then we are cooked here.
+            contract_assert(!storage.self_alias(src));
             adjust_old_for_replace(pos, count, add_size);
-            std::ranges::copy_n(data, add_size, storage.data() + pos);
+            std::ranges::copy_n(src, add_size, storage.data() + pos);
             return *this;
         }
         if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {

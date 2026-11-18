@@ -277,15 +277,6 @@ union storage {
     }
 };
 
-template<typename Iter, typename Sent, typename CharT>
-concept eligible_iter_and_sent = std::input_iterator<Iter>
-    && std::sentinel_for<Sent, Iter>
-    && std::convertible_to<std::iter_reference_t<Iter>, CharT>;
-
-template<typename R, typename CharT>
-concept container_compatible_range = std::ranges::input_range<R>
-    && std::convertible_to<std::ranges::range_reference_t<R>, CharT>;
-
 template<typename Iter, typename CharT>
 concept string_like_iter = std::contiguous_iterator<Iter>
     && std::convertible_to<typename std::iterator_traits<Iter>::pointer, const CharT*>;
@@ -635,7 +626,8 @@ private:
 
     constexpr details::status status() const noexcept { return storage.status(); }
 
-    template<details::container_compatible_range<char_type> R>
+    template<std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, char_type>
     consteval void write_static_string(R&& r)
         pre (!status().allocated)
         post (!status().allocated)
@@ -971,8 +963,8 @@ public:
         }
     }
 
-    template<typename Iter, typename Sent>
-        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    template<std::input_iterator Iter, std::sentinel_for<Iter> Sent>
+        requires std::convertible_to<std::iter_reference_t<Iter>, CharT>
     constexpr basic_cow_string(Iter iter, Sent sent,
                                const allocator_type& alloc = allocator_type())
         : basic_cow_string(alloc)
@@ -984,7 +976,8 @@ public:
         }
     }
 
-    template<details::container_compatible_range<char_type> R>
+    template<std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, char_type>
     constexpr basic_cow_string(std::from_range_t, R&& r,
                                const allocator_type& alloc = allocator_type())
         : basic_cow_string(alloc)
@@ -1496,8 +1489,8 @@ public:
         return assign(il);
     }
 
-    template<typename Iter, typename Sent>
-        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    template<std::input_iterator Iter, std::sentinel_for<Iter> Sent>
+        requires std::convertible_to<std::iter_reference_t<Iter>, char_type>
     constexpr basic_cow_string& assign(Iter iter, Sent sent) {
         if consteval {
             std::ranges::subrange r(std::move(iter), std::move(sent));
@@ -1550,7 +1543,8 @@ public:
         return replace(0, npos, view.data(), view.data() + view.size());
     }
 
-    template<details::container_compatible_range<char_type> R>
+    template<std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, char_type>
     constexpr basic_cow_string& assign_range(R&& r) {
         return replace_with_range(0, npos, std::forward<R>(r));
     }
@@ -1676,8 +1670,8 @@ public:
         return replace(size(), 0, s, s + count);
     }
 
-    template<typename Iter, typename Sent>
-        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    template<std::input_iterator Iter, std::sentinel_for<Iter> Sent>
+        requires std::convertible_to<std::iter_reference_t<Iter>, char_type>
     basic_cow_string& append(Iter iter, Sent sent)
         post (exclusive())
     {
@@ -1697,7 +1691,8 @@ public:
         return replace(size(), 0, view.data(), view.data() + view.size());
     }
 
-    template<details::container_compatible_range<char_type> R>
+    template<std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, char_type>
     basic_cow_string& append_range(R&& r)
         post (exclusive())
     {
@@ -1755,8 +1750,8 @@ public:
         return replace(index, 0, s, s + count);
     }
 
-    template<typename Iter, typename Sent>
-        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    template<std::input_iterator Iter, std::sentinel_for<Iter> Sent>
+        requires std::convertible_to<std::iter_reference_t<Iter>, char_type>
     basic_cow_string& insert(size_type index, Iter iter, Sent sent)
         post (exclusive())
     {
@@ -1794,8 +1789,8 @@ public:
         return begin() + index;
     }
 
-    template<typename Iter, typename Sent>
-        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    template<std::input_iterator Iter, std::sentinel_for<Iter> Sent>
+        requires std::convertible_to<std::iter_reference_t<Iter>, char_type>
     iterator insert(const_iterator pos, Iter iter, Sent sent)
         pre (is_my_iter(pos))
         post (exclusive())
@@ -1821,7 +1816,8 @@ public:
         return begin() + index;
     }
 
-    template<details::container_compatible_range<char_type> R>
+    template<std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, char_type>
     iterator insert_range(const_iterator pos, R&& r)
         pre (is_my_iter(pos))
         post (exclusive())
@@ -1919,8 +1915,8 @@ public:
         return replace(index, count, count2, ch);
     }
 
-    template<typename Iter, typename Sent>
-        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    template<std::input_iterator Iter, std::sentinel_for<Iter> Sent>
+        requires std::convertible_to<std::iter_reference_t<Iter>, char_type>
     basic_cow_string& replace(size_type pos, size_type count, Iter iter, Sent sent)
         post (exclusive())
     {
@@ -2019,8 +2015,8 @@ public:
         }
     }
 
-    template<typename Iter, typename Sent>
-        requires details::eligible_iter_and_sent<Iter, Sent, char_type>
+    template<std::input_iterator Iter, std::sentinel_for<Iter> Sent>
+        requires std::convertible_to<std::iter_reference_t<Iter>, char_type>
     basic_cow_string& replace(const_iterator first, const_iterator last, Iter iter, Sent sent)
         pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
@@ -2057,7 +2053,8 @@ public:
         return replace(index, count, view.data(), view.data() + view.size());
     }
 
-    template<details::container_compatible_range<char_type> R>
+    template<std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, char_type>
     basic_cow_string& replace_with_range(size_type pos, size_type count, R&& r)
         post (exclusive())
     {
@@ -2079,7 +2076,8 @@ public:
         }
     }
 
-    template<details::container_compatible_range<char_type> R>
+    template<std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, char_type>
     basic_cow_string& replace_with_range(const_iterator first, const_iterator last, R&& r)
         pre (is_my_iter(first) && is_my_iter(last))
         pre (first <= last)
@@ -2095,7 +2093,7 @@ private:
     storage_type storage = {};
 };
 
-template<typename Iter, std::sentinel_for<Iter> Sent,
+template<std::input_iterator Iter, std::sentinel_for<Iter> Sent,
          typename Allocator = std::allocator<std::remove_cv_t<std::iter_value_t<Iter>>>>
 basic_cow_string(Iter, Sent, Allocator = Allocator())
     -> basic_cow_string<std::remove_cv_t<std::iter_value_t<Iter>>, Allocator>;

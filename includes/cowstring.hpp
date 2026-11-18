@@ -1932,16 +1932,29 @@ public:
                 return *this;
             }
             if (try_inplace_self_replace(pos, count, src, add_size)) {
+                // May fallthrough to the next branch if self-replacement is not possible.
                 return *this;
             }
-            // May fallthrough to the next branch if self-replacement is not possible.
+        } else if constexpr (details::can_direct_replace<Iter, char_type>()) {
+            const size_type add_size = std::ranges::distance(iter, sent);
+            const auto* const data = std::to_address(iter);
+            adjust_old_for_replace(pos, count, add_size);
+            std::ranges::copy_n(data, add_size, storage.data() + pos);
+            return *this;
         }
         if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            if constexpr (details::can_direct_replace<Iter, char_type>()) {
-                const auto* const data = std::to_address(iter);
-                adjust_old_for_replace(pos, count, add_size);
-                std::ranges::copy_n(data, add_size, storage.data() + pos);
+            if (status() == details::small && empty()) {
+                // No one can alias with a empty string.
+                // Just resize and write into the storage.
+                adjust_old_for_replace(0, 0, add_size);
+                try {
+                    std::ranges::copy_n(iter, add_size, storage.data());
+                } catch (...) {
+                    resize(0);
+                    shrink_to_fit();
+                    throw;
+                }
                 return *this;
             } else {
                 auto r = [&iter, add_size] {
@@ -1972,7 +1985,7 @@ public:
         } else {
             if (status() == details::small && empty()) {
                 // Although we know nothing about source range,
-                // no one could alias with a empty string anyway.
+                // no one can alias with a empty string anyway.
                 // This branch is mostly for constructors.
                 try {
                     // Smaller buffer to inline

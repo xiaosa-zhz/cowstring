@@ -1956,32 +1956,30 @@ public:
                     throw;
                 }
                 return *this;
-            } else {
-                auto r = [&iter, add_size] {
-                    if constexpr (std::random_access_iterator<Iter>) {
-                        return std::ranges::subrange(iter, iter + add_size);
-                    } else {
-                        return std::ranges::subrange(
-                            std::counted_iterator(std::move(iter), add_size),
-                            std::default_sentinel
-                        );
-                    }
-                }();
-                static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
-                if (add_size <= static_buffer_max) {
-                    // Make stack buffer separate stack frame.
-                    return [this](this auto, size_type pos, size_type count, auto r) -> auto& {
-                        using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
-                        buffer_type buffer(std::from_range, std::move(r));
-                        const char_type* const data = buffer.data();
-                        return replace(pos, count, data, data + buffer.size());
-                    }(pos, count, std::move(r));
-                } else {
-                    string_type cp(std::from_range, std::move(r), get_allocator());
-                    const char_type* const data = cp.data();
-                    return replace(pos, count, data, data + cp.size());
-                }
             }
+            auto r = [&iter, add_size] {
+                if constexpr (std::random_access_iterator<Iter>) {
+                    return std::ranges::subrange(iter, iter + add_size);
+                } else {
+                    return std::ranges::subrange(
+                        std::counted_iterator(std::move(iter), add_size),
+                        std::default_sentinel
+                    );
+                }
+            }();
+            static constexpr std::size_t static_buffer_max = 2048 / sizeof(char_type);
+            if (add_size <= static_buffer_max) {
+                // Make stack buffer separate stack frame.
+                return [this](this auto, size_type pos, size_type count, auto r) -> auto& {
+                    using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
+                    buffer_type buffer(std::from_range, std::move(r));
+                    const char_type* const data = buffer.data();
+                    return replace(pos, count, data, data + buffer.size());
+                }(pos, count, std::move(r));
+            }
+            string_type cp(std::from_range, std::move(r), get_allocator());
+            const char_type* const data = cp.data();
+            return replace(pos, count, data, data + cp.size());
         } else {
             if (status() == details::small && empty()) {
                 // Although we know nothing about source range,

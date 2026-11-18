@@ -897,12 +897,23 @@ private:
         }
     }
 
-    bool try_inplace_self_replace(size_type pos, size_type count,
-                                  const char_type* src, size_type add_size)
+    basic_cow_string& no_alias_replace(size_type pos, size_type count, std::span<const char_type> buffer)
+        pre (!storage.self_alias(buffer.data()))
+    {
+        const char_type* const src = buffer.data();
+        const size_type add_size = buffer.size();
+        adjust_old_for_replace(pos, count, add_size);
+        std::ranges::copy_n(src, add_size, storage.data() + pos);
+        return *this;
+    }
+
+    bool try_inplace_self_replace(size_type pos, size_type count, std::span<const char_type> buffer)
     {
         if (!exclusive()) {
             return false;
         }
+        const char_type* const src = buffer.data();
+        const size_type add_size = buffer.size();
         const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
         const size_type new_size = old_size - rcount + add_size;
@@ -1925,11 +1936,9 @@ public:
             const size_type add_size = std::ranges::distance(iter, sent);
             const char_type* const src = std::to_address(iter);
             if (!storage.self_alias(src)) {
-                adjust_old_for_replace(pos, count, add_size);
-                std::ranges::copy_n(src, add_size, storage.data() + pos);
-                return *this;
+                return no_alias_replace(pos, count, { src, add_size });
             }
-            if (try_inplace_self_replace(pos, count, src, add_size)) {
+            if (try_inplace_self_replace(pos, count, { src, add_size })) {
                 // May fallthrough to the next branch if self-replacement is not possible.
                 return *this;
             }
@@ -1961,49 +1970,40 @@ public:
                     );
                 }
             }();
-            static constexpr std::size_t static_buffer_max = (1024 + 512) / sizeof(char_type);
+            static constexpr std::size_t static_buffer_max = 2048 / sizeof(char_type);
             if (add_size <= static_buffer_max) {
-                // Make stack buffer separate stack frame.
+                // Make stack buffer separate frame.
                 return [this](this auto, size_type pos, size_type count, auto r) -> auto& {
                     using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
                     buffer_type buffer(std::from_range, std::move(r));
-                    const char_type* const data = buffer.data();
-                    return replace(pos, count, data, data + buffer.size());
+                    return no_alias_replace(pos, count, buffer);
                 }(pos, count, std::move(r));
             }
             string_type cp(std::from_range, std::move(r), get_allocator());
-            const char_type* const data = cp.data();
-            return replace(pos, count, data, data + cp.size());
+            return no_alias_replace(pos, count, cp);
         } else {
             if (status() == details::small && empty()) {
                 // Although we know nothing about source range,
                 // no one can alias with a empty string anyway.
                 // This branch is mostly for constructors.
-                try {
-                    // Smaller buffer to inline
-                    static constexpr std::size_t input_cache_max = 128 / sizeof(char_type);
-                    std::inplace_vector<char_type, input_cache_max> buffer;
-                    while (iter != sent) {
-                        buffer.push_back(*iter);
-                        if (buffer.size() == buffer.capacity()) {
-                            append(buffer.data(), buffer.size());
-                            buffer.clear();
-                        }
-                        ++iter;
+                basic_cow_string str(get_allocator());
+                static constexpr std::size_t input_cache_max = 256 / sizeof(char_type);
+                std::inplace_vector<char_type, input_cache_max> buffer;
+                while (iter != sent) {
+                    buffer.push_back(*iter);
+                    if (buffer.size() == buffer.capacity()) {
+                        str.no_alias_replace(str.size(), 0, buffer);
+                        buffer.clear();
                     }
-                    if (!buffer.empty()) {
-                        append(buffer.data(), buffer.size());
-                    }
-                } catch (...) {
-                    basic_cow_string(get_allocator()).swap(*this);
-                    throw;
+                    ++iter;
                 }
+                str.no_alias_replace(str.size(), 0, buffer);
+                str.swap(*this);
                 return *this;
             } else {
                 std::ranges::subrange r(std::move(iter), std::move(sent));
                 string_type cp(std::from_range, std::move(r), get_allocator());
-                const char_type* const data = cp.data();
-                return replace(pos, count, data, data + cp.size());
+                return no_alias_replace(pos, count, cp);
             }
         }
     }

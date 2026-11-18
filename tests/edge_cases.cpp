@@ -61,8 +61,8 @@ using SV = std::string_view;
 //     buffer of stack_buffer_max characters (when the receiver is not empty);
 //   * the single-pass input branch flushes a smaller cache in chunks.
 // The sizes below are chosen to land on, and just past, those boundaries.
-constexpr std::size_t stack_buffer_max = (1024 + 512) / sizeof(S::value_type);
-constexpr std::size_t input_cache_max = 128 / sizeof(S::value_type);
+constexpr std::size_t stack_buffer_max = 2048 / sizeof(S::value_type);
+constexpr std::size_t input_cache_max = 256 / sizeof(S::value_type);
 
 // ---------------------------------------------------------------------------
 // Moving from a literal with a position/count has no allocation to steal, so

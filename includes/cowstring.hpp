@@ -1902,6 +1902,7 @@ public:
             }
         }
         static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
+        using small_buffer = std::inplace_vector<char_type, static_buffer_max>;
         if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
             std::ranges::subrange r{
@@ -1909,7 +1910,7 @@ public:
                 std::default_sentinel
             };
             if (add_size < static_buffer_max) {
-                std::inplace_vector<char_type, static_buffer_max> buffer(std::from_range, std::move(r));
+                small_buffer buffer(std::from_range, std::move(r));
                 const char_type* const data = buffer.data();
                 return replace(pos, count, data, data + buffer.size());
             } else {
@@ -1923,7 +1924,7 @@ public:
                 // no one could alias with a empty string anyway.
                 // This branch is mostly for constructors.
                 try {
-                    std::inplace_vector<char_type, static_buffer_max> buffer;
+                    small_buffer buffer;
                     while (iter != sent) {
                         buffer.push_back(*iter);
                         if (buffer.size() == buffer.capacity()) {

@@ -1951,8 +1951,7 @@ public:
                 try {
                     std::ranges::copy_n(iter, add_size, storage.data());
                 } catch (...) {
-                    resize(0);
-                    shrink_to_fit();
+                    basic_cow_string(get_allocator()).swap(*this);
                     throw;
                 }
                 return *this;
@@ -2001,8 +2000,7 @@ public:
                         append(buffer.data(), buffer.size());
                     }
                 } catch (...) {
-                    clear();
-                    shrink_to_fit();
+                    basic_cow_string(get_allocator()).swap(*this);
                     throw;
                 }
                 return *this;

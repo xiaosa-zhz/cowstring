@@ -847,7 +847,7 @@ private:
     {
         const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
-        const size_type new_size = old_size - rcount + add_size;
+        const size_type new_size = std::saturating_add(old_size - rcount, add_size);
         const auto allocate_for_replace = [&, this]<bool is_exclusive>(std::bool_constant<is_exclusive>) {
             size_type new_capacity = new_size;
             if constexpr (is_exclusive) {
@@ -1944,16 +1944,11 @@ public:
         }
         if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            if (status() == details::small && empty()) {
-                // No one can alias with a empty string.
-                // Just resize and write into the storage.
-                adjust_old_for_replace(0, 0, add_size);
-                try {
-                    std::ranges::copy_n(iter, add_size, storage.data());
-                } catch (...) {
-                    basic_cow_string(get_allocator()).swap(*this);
-                    throw;
-                }
+            if (!exclusive() || (status() == details::small && empty())) {
+                basic_cow_string cp(*this, get_allocator());
+                cp.adjust_old_for_replace(pos, count, add_size);
+                std::ranges::copy_n(iter, add_size, cp.storage.data() + pos);
+                cp.swap(*this);
                 return *this;
             }
             auto r = [&iter, add_size] {

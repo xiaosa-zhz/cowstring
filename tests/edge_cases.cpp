@@ -52,10 +52,11 @@ void check_equal(std::size_t got, std::size_t want, std::string_view what) {
 using S = cow::cow_string;
 using SV = std::string_view;
 
-// Mirrors the chunk buffer that the single pass append loop of replace() fills
-// before handing the characters over to the string. Kept in sync on purpose:
-// the sizes below are chosen to land on, and just past, a chunk boundary.
-constexpr std::size_t single_pass_chunk = 128 / sizeof(S::value_type);
+// Mirrors the stack buffer that replace() uses for every non-contiguous source:
+// both the sized/forward branch (which materialises into it in one go) and the
+// single pass branch (which flushes it in chunks) share this size. The sizes
+// below are chosen to land on, and just past, that boundary.
+constexpr std::size_t stack_buffer_max = 1024 / sizeof(S::value_type);
 
 // ---------------------------------------------------------------------------
 // Moving from a literal with a position/count has no allocation to steal, so
@@ -428,30 +429,43 @@ void test_allocator_mismatch() {
 }
 
 // ---------------------------------------------------------------------------
-// A replace source that is not contiguous is materialised first. The small
-// buffered variant and the large cow_string variant are separate paths.
+// A replace source that is not contiguous is materialised first, either into
+// the shared stack buffer or into a temporary string. Which of the two is used
+// depends only on the length of the source, so the sizes below sit on that
+// boundary.
 void test_large_noncontiguous_replace() {
-    const std::list<char> large(1500, 'z');
+    constexpr std::size_t room = 3 * stack_buffer_max + 10;
 
-    // Exclusive receiver with enough capacity: the default branch materialises
-    // the source because it does not fit the 1024 byte stack buffer.
-    S inplace(10, 'a');
-    inplace.reserve(4000);
-    inplace.replace(0, 0, large.begin(), large.end());
-    check_equal(inplace.size(), 1510, "large non-contiguous replace size");
-    check(inplace.view() == SV(std::string(1500, 'z') + std::string(10, 'a')),
+    // Just below the buffer limit: the source is copied onto the stack.
+    const std::list<char> fits(stack_buffer_max - 1, 'b');
+    S buffered(10, 'a');
+    buffered.reserve(room);
+    buffered.replace(0, 0, fits.begin(), fits.end());
+    check_equal(buffered.size(), stack_buffer_max + 9, "buffered non-contiguous replace size");
+    check(buffered.view() == SV(std::string(stack_buffer_max - 1, 'b') + std::string(10, 'a')),
+          "buffered non-contiguous replace contents");
+
+    // Exactly one buffer worth of characters no longer fits.
+    const std::list<char> at_limit(stack_buffer_max, 'c');
+    S at_limit_target(10, 'a');
+    at_limit_target.reserve(room);
+    at_limit_target.replace(0, 0, at_limit.begin(), at_limit.end());
+    check_equal(at_limit_target.size(), stack_buffer_max + 10,
+                "at-limit non-contiguous replace size");
+    check(at_limit_target.view() == SV(std::string(stack_buffer_max, 'c') + std::string(10, 'a')),
+          "at-limit non-contiguous replace contents");
+
+    // Beyond the limit: the source goes through a temporary cow_string.
+    const std::list<char> beyond(2 * stack_buffer_max, 'd');
+    S large(10, 'a');
+    large.reserve(room);
+    large.replace(0, 0, beyond.begin(), beyond.end());
+    check_equal(large.size(), 2 * stack_buffer_max + 10, "large non-contiguous replace size");
+    check(large.view() == SV(std::string(2 * stack_buffer_max, 'd') + std::string(10, 'a')),
           "large non-contiguous replace contents");
 
-    // Inside the small buffer variant the source is buffered on the stack.
-    S small_source(10, 'a');
-    small_source.reserve(4000);
-    const std::list<char> medium(30, 'b');
-    small_source.replace(0, 0, medium.begin(), medium.end());
-    check(small_source.view() == SV(std::string(30, 'b') + std::string(10, 'a')),
-          "small non-contiguous replace contents");
-
-    // A shared (non-exclusive) receiver cannot be updated in place and takes
-    // the copy-and-swap fallback.
+    // A shared receiver cannot be written in place, so the replacement detaches
+    // it and leaves the other owner alone.
     S owner(1200, 'a');
     S shared = owner;
     check(!shared.exclusive(), "receiver is shared");
@@ -460,7 +474,9 @@ void test_large_noncontiguous_replace() {
     check_equal(shared.size(), 1220, "shared receiver replace size");
     check(shared.view() == SV(std::string(30, 'b') + std::string(1190, 'a')),
           "shared receiver replace contents");
+    check(shared.exclusive(), "shared receiver is detached by the replace");
     check_equal(owner.size(), 1200, "shared owner is not modified");
+    check_equal(owner.cur_count(), 1, "owner is alone again after the detach");
 
     // A single pass source has no distance and is materialised directly.
     std::istringstream input("XYZ");
@@ -500,15 +516,17 @@ void test_replace_single_pass_empty() {
     check(from_empty.empty(), "single pass source can be empty");
     check(from_empty.exclusive(), "empty result is exclusive");
 
-    // Enough characters to grow past the small buffer.
-    std::istringstream long_input(std::string(100, 'g'));
+    // Just below one buffer: it grows past the small string and is only handed
+    // over once the source is exhausted, so no intermediate flush happens.
+    const std::string below_limit(stack_buffer_max - 1, 'g');
+    std::istringstream long_input(below_limit);
     S grown(std::istreambuf_iterator<char>(long_input), std::istreambuf_iterator<char>{});
-    check(grown.view() == SV(std::string(100, 'g')), "long single pass source");
+    check(grown.view() == SV(below_limit), "single pass source just below the buffer limit");
     check(grown.is_owned(), "long single pass source is allocated");
 
-    // Source larger than one chunk: the buffer has to be flushed while reading,
+    // Source larger than one buffer: the buffer has to be flushed while reading,
     // and the tail left over is flushed once the source is exhausted.
-    const std::string bulk(3 * single_pass_chunk + 7, 'b');
+    const std::string bulk(3 * stack_buffer_max + 7, 'b');
     std::istringstream bulk_input(bulk);
     S from_bulk(std::istreambuf_iterator<char>(bulk_input), std::istreambuf_iterator<char>{});
     check(from_bulk.view() == SV(bulk), "single pass source spanning several chunks");
@@ -516,7 +534,7 @@ void test_replace_single_pass_empty() {
 
     // An exact multiple of the chunk size leaves the buffer empty at the end,
     // so the final flush is skipped.
-    const std::string exact(2 * single_pass_chunk, 'c');
+    const std::string exact(2 * stack_buffer_max, 'c');
     std::istringstream exact_input(exact);
     S from_exact(std::istreambuf_iterator<char>(exact_input), std::istreambuf_iterator<char>{});
     check(from_exact.view() == SV(exact), "single pass source on a chunk boundary");
@@ -577,8 +595,8 @@ void test_replace_throw_in_source() {
     // The read fails only after whole chunks have already been handed over to
     // the string, so the cleanup has to drop those as well.
     {
-        const std::string text(3 * single_pass_chunk + 9, 'w');
-        const char* const fail_at = text.data() + 2 * single_pass_chunk + 1;
+        const std::string text(3 * stack_buffer_max + 9, 'w');
+        const char* const fail_at = text.data() + 2 * stack_buffer_max + 1;
         int failures = 0;
         S s;
         bool caught = false;

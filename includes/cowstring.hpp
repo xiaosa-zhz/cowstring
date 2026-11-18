@@ -1944,15 +1944,24 @@ public:
                 std::ranges::copy_n(data, add_size, storage.data() + pos);
                 return *this;
             } else {
-                std::ranges::subrange r{
-                    std::counted_iterator(std::move(iter), add_size),
-                    std::default_sentinel
-                };
+                auto r = [&] {
+                    if constexpr (std::random_access_iterator<Iter>) {
+                        return std::ranges::subrange(iter, iter + add_size);
+                    } else {
+                        return std::ranges::subrange(
+                            std::counted_iterator(std::move(iter), add_size),
+                            std::default_sentinel);
+                    }
+                }();
                 static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
                 if (add_size < static_buffer_max) {
-                    std::inplace_vector<char_type, static_buffer_max> buffer(std::from_range, std::move(r));
-                    const char_type* const data = buffer.data();
-                    return replace(pos, count, data, data + buffer.size());
+                    // Make stack buffer separate stack frame.
+                    return [this, pos, count]<typename R>(R&& r) -> basic_cow_string& {
+                        using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
+                        buffer_type buffer(std::from_range, std::forward<R>(r));
+                        const char_type* const data = buffer.data();
+                        return replace(pos, count, data, data + buffer.size());
+                    }(std::move(r));
                 } else {
                     string_type cp(std::from_range, std::move(r), get_allocator());
                     const char_type* const data = cp.data();

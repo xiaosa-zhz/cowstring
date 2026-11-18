@@ -483,6 +483,57 @@ void test_replace_overloads() {
     }
 }
 
+// --------------------------------------- direct replace from foreign types
+// A contiguous source whose value type is not char_type is copied straight into
+// the destination, without being materialised first, as long as that type is a
+// non-class type: the conversion is then performed by the language itself and
+// cannot observe the string while it is being modified. A class-typed source
+// (not_char below) has to go through the buffers instead.
+void test_direct_replace_from_foreign_type() {
+    // Non-class type, small source: the direct copy happens in place.
+    const std::array<unsigned char, 3> few{'x', 'y', 'z'};
+    S small("abc");
+    small.replace(1, 1, few.begin(), few.end());
+    check(small == "axyzc", "direct replace from unsigned char, small source");
+
+    // Non-class type, source far beyond the stack buffer size: the direct copy
+    // has no size limit because no buffer is involved, the string just grows.
+    const std::vector<unsigned char> many(3 * 1024, static_cast<unsigned char>('q'));
+    S large(3, 'a');
+    const std::size_t large_capacity = large.real_capacity();
+    large.replace(1, 1, many.begin(), many.end());
+    std::string expected("a");
+    expected.append(many.size(), 'q');
+    expected.push_back('a');
+    check(large.view() == SV(expected), "direct replace from unsigned char, large contents");
+    check(large.real_capacity() >= large_capacity, "direct replace grows the destination");
+
+    // Other non-class value types that convert to char also take the direct
+    // path; each one instantiates the check with its own pointer type.
+    const std::array<signed char, 2> signed_bytes{'1', '2'};
+    S from_signed("ab");
+    from_signed.replace(0, 0, signed_bytes.begin(), signed_bytes.end());
+    check(from_signed == "12ab", "direct replace from signed char");
+
+    const std::array<char16_t, 2> wide{u'y', u'z'};
+    S from_wide("ab");
+    from_wide.append(wide.begin(), wide.end());
+    check(from_wide == "abyz", "direct replace from char16_t");
+
+    const std::array<char32_t, 2> wider{U'p', U'q'};
+    S from_wider("abc");
+    from_wider.insert(1, wider.begin(), wider.end());
+    check(from_wider == "apqbc", "direct replace from char32_t");
+
+    // A class type that converts to char cannot be copied directly (the
+    // conversion may do anything, including touching the destination), so it is
+    // materialised first.
+    const std::array<not_char, 4> converted{};
+    S from_class("x");
+    from_class.assign(converted.begin(), converted.end());
+    check(from_class == "7777", "class typed source is buffered");
+}
+
 // ---------------------------------------- iterator / sentinel pair overloads
 // Every interface that takes an iterator/sentinel pair has to decide how to
 // consume it. The pairs below all describe the same three characters, "xyz",
@@ -640,6 +691,7 @@ int main() {
     test_assignment();
     test_modifiers();
     test_replace_overloads();
+    test_direct_replace_from_foreign_type();
     test_iterator_shape_overloads();
     test_free_functions();
 

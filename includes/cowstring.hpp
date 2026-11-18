@@ -290,6 +290,17 @@ template<typename Iter, typename CharT>
 concept string_like_iter = std::contiguous_iterator<Iter>
     && std::convertible_to<typename std::iterator_traits<Iter>::pointer, const CharT*>;
 
+template<typename Iter, typename CharT>
+consteval bool can_direct_replace() noexcept {
+    if constexpr (std::contiguous_iterator<Iter>) {
+        using pointer = std::iterator_traits<Iter>::pointer;
+        using pointee = std::remove_cv_t<std::remove_pointer_t<pointer>>;
+        return !std::is_class_v<pointee> && !std::same_as<pointee, CharT>;
+    } else {
+        return false;
+    }
+}
+
 // In std::string, some interfaces take null-terminated string
 // as argument. This facility only accepts string literals
 // known at compile time for corresponding APIs.
@@ -1929,18 +1940,25 @@ public:
         using small_buffer = std::inplace_vector<char_type, static_buffer_max>;
         if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
-            std::ranges::subrange r{
-                std::counted_iterator(std::move(iter), add_size),
-                std::default_sentinel
-            };
-            if (add_size < static_buffer_max) {
-                small_buffer buffer(std::from_range, std::move(r));
-                const char_type* const data = buffer.data();
-                return replace(pos, count, data, data + buffer.size());
+            if constexpr (details::can_direct_replace<Iter, char_type>()) {
+                const auto* const data = std::to_address(iter);
+                adjust_old_for_replace(pos, count, add_size);
+                std::ranges::copy_n(data, add_size, storage.data() + pos);
+                return *this;
             } else {
-                string_type cp(std::from_range, std::move(r), get_allocator());
-                const char_type* const data = cp.data();
-                return replace(pos, count, data, data + cp.size());
+                std::ranges::subrange r{
+                    std::counted_iterator(std::move(iter), add_size),
+                    std::default_sentinel
+                };
+                if (add_size < static_buffer_max) {
+                    small_buffer buffer(std::from_range, std::move(r));
+                    const char_type* const data = buffer.data();
+                    return replace(pos, count, data, data + buffer.size());
+                } else {
+                    string_type cp(std::from_range, std::move(r), get_allocator());
+                    const char_type* const data = cp.data();
+                    return replace(pos, count, data, data + cp.size());
+                }
             }
         } else {
             if (status() == details::small && empty()) {

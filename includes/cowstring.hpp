@@ -2061,7 +2061,6 @@ public:
     basic_cow_string& replace_with_range(size_type pos, size_type count, R&& r)
         post (exclusive())
     {
-        // TODO: Add approximately_sized_range support when vendor has it.
         if constexpr (std::ranges::contiguous_range<R>) {
             const auto* const data = std::ranges::data(r);
             const auto length = std::ranges::distance(r);

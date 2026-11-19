@@ -498,7 +498,7 @@ void test_direct_replace_from_foreign_type() {
 
     // Non-class type, source far beyond the stack buffer size: the direct copy
     // has no size limit because no buffer is involved, the string just grows.
-    const std::vector<unsigned char> many(3 * 2048, static_cast<unsigned char>('q'));
+    const std::vector<unsigned char> many(3 * 1024, static_cast<unsigned char>('q'));
     S large(3, 'a');
     const std::size_t large_capacity = large.real_capacity();
     large.replace(1, 1, many.begin(), many.end());

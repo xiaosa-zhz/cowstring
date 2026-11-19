@@ -564,6 +564,14 @@ inline bool try_inplace_self_replace(std::span<const std::byte> head,
     return false;
 }
 
+template<typename SizeT>
+constexpr SizeT growing(SizeT old_real_cap, SizeT request_new_cap, SizeT max_size) noexcept {
+    static constexpr SizeT growing_factor = 2;
+    const SizeT grow = std::saturating_mul(old_real_cap, growing_factor);
+    const SizeT ceil_grow = std::ranges::min(grow, max_size);
+    return std::ranges::max(request_new_cap, ceil_grow);
+}
+
 } // namespace cow::details
 
 template<typename CharT, typename Allocator = std::allocator<CharT>>
@@ -600,7 +608,6 @@ private:
     static_assert(sizeof(storage_type) == sizeof(storage_type::dyn));
     static_assert(std::contiguous_iterator<iterator>);
     static_assert(std::contiguous_iterator<const_iterator>);
-    static constexpr size_type growing_factor = 2;
 
     // Allocator strategy of cow_string
     // On copy:
@@ -800,10 +807,8 @@ private:
             const size_type old_real_cap = real_capacity();
             if (new_cap > old_real_cap) {
                 // The auto growing branch
-                const size_type grow = std::saturating_mul(old_real_cap, growing_factor);
-                const size_type ceil_grow = std::ranges::min(grow, max_size());
-                const size_type final_cap = std::ranges::max(new_cap, ceil_grow);
-                return allocate_exclusive_buffer(view(), final_cap);
+                return allocate_exclusive_buffer(view(),
+                    details::growing(old_real_cap, new_cap, max_size()));
             } else if (new_cap > capacity()) {
                 // Can use prefix to get enough capacity without reallocation.
                 const auto alloc = storage.allocation();
@@ -841,6 +846,23 @@ private:
         return le(v.data(), ptr) && le(ptr, v.data() + v.size());
     }
 
+    void reallocate_for_replace(size_type pos, size_type old_size, size_type add_size,
+                                size_type new_size, size_type rcount, size_type new_capacity)
+    {
+        auto* const control = details::allocate(get_allocator(), new_capacity);
+        char_type* const data = control->template data<char_type>();
+        // Copy head and tail of original string, and leave a hole for new content
+        const char_type* const old_data = std::as_const(*this).data();
+        std::ranges::copy_n(old_data, pos, data);
+        std::ranges::copy_n(old_data + pos + rcount, old_size - pos - rcount, data + pos + add_size);
+        deallocate_if_needed();
+        std::start_lifetime(storage.dyn);
+        storage.dyn = {
+            .data = data, .size = new_size,
+            .control = reinterpret_cast<std::uintptr_t>(control) >> 2
+        };
+    }
+
     void adjust_old_for_replace(size_type pos, size_type count, size_type add_size)
         pre (pos <= size())
         post (exclusive())
@@ -848,32 +870,11 @@ private:
         const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
         const size_type new_size = std::saturating_add(old_size - rcount, add_size);
-        const auto allocate_for_replace = [&, this]<bool is_exclusive>(std::bool_constant<is_exclusive>) {
-            size_type new_capacity = new_size;
-            if constexpr (is_exclusive) {
-                const size_type old_real_cap = real_capacity();
-                contract_assert(new_size > old_real_cap);
-                const size_type grow = std::saturating_mul(old_real_cap, growing_factor);
-                const size_type ceil_grow = std::ranges::min(grow, max_size());
-                const size_type final_cap = std::ranges::max(new_size, ceil_grow);
-                new_capacity = final_cap;
-            }
-            auto* const control = details::allocate(get_allocator(), new_capacity);
-            char_type* const data = control->template data<char_type>();
-            // Copy head and tail of original string, and leave a hole for new content
-            const char_type* const old_data = std::as_const(*this).data();
-            std::ranges::copy_n(old_data, pos, data);
-            std::ranges::copy_n(old_data + pos + rcount, old_size - pos - rcount, data + pos + add_size);
-            deallocate_if_needed();
-            std::start_lifetime(storage.dyn);
-            storage.dyn = {
-                .data = data, .size = new_size,
-                .control = reinterpret_cast<std::uintptr_t>(control) >> 2
-            };
-        };
         if (!exclusive()) {
-            allocate_for_replace(std::false_type{});
-        } else if (new_size <= capacity()) {
+            reallocate_for_replace(pos, old_size, add_size, new_size, rcount, new_size);
+            return;
+        }
+        if (new_size <= capacity()) {
             // If tail capacity is enough, move tail only
             char_type* const data = storage.data();
             std::ranges::copy_n(data + pos + rcount, old_size - pos - rcount, data + pos + add_size);
@@ -882,7 +883,10 @@ private:
             } else {
                 storage.sso.size = static_cast<unsigned char>(new_size);
             }
-        } else if (new_size <= real_capacity()) {
+            return;
+        }
+        const size_type old_real_cap = real_capacity();
+        if (new_size <= old_real_cap) {
             // If real capacity is enough, move head and tail to front
             contract_assert(status() == details::owned);
             const char_type* const data = storage.data();
@@ -891,10 +895,10 @@ private:
             std::ranges::copy_n(data + pos + rcount, old_size - pos - rcount, alloc.data() + pos + add_size);
             storage.dyn.data = alloc.data();
             storage.dyn.size = new_size;
-        } else {
-            // Need reallocation
-            allocate_for_replace(std::true_type{});
+            return;
         }
+        reallocate_for_replace(pos, old_size, add_size, new_size, rcount,
+            details::growing(old_real_cap, new_size, max_size()));
     }
 
     basic_cow_string& no_alias_replace(size_type pos, size_type count, std::span<const char_type> buffer)
@@ -1960,6 +1964,18 @@ public:
                 cp.swap(*this);
                 return *this;
             }
+            const size_type old_size = size();
+            const size_type rcount = std::ranges::min(count, old_size - pos);
+            const size_type new_size = old_size - rcount + add_size;
+            const size_type old_real_cap = real_capacity();
+            if (new_size > old_real_cap) {
+                basic_cow_string cp(*this, get_allocator());
+                cp.reallocate_for_replace(pos, old_size, add_size, new_size, rcount,
+                    details::growing(old_real_cap, new_size, max_size()));
+                std::ranges::copy_n(iter, add_size, cp.storage.data() + pos);
+                cp.swap(*this);
+                return *this;
+            }
             auto r = [&iter, add_size] {
                 if constexpr (std::random_access_iterator<Iter>) {
                     return std::ranges::subrange(iter, iter + add_size);
@@ -1970,14 +1986,11 @@ public:
                     );
                 }
             }();
-            static constexpr std::size_t static_buffer_max = 2048 / sizeof(char_type);
+            static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
             if (add_size <= static_buffer_max) {
-                // Make stack buffer separate frame.
-                return [this](this auto, size_type pos, size_type count, auto r) -> auto& {
-                    using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
-                    buffer_type buffer(std::from_range, std::move(r));
-                    return no_alias_replace(pos, count, buffer);
-                }(pos, count, std::move(r));
+                using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
+                buffer_type buffer(std::from_range, std::move(r));
+                return no_alias_replace(pos, count, buffer);
             }
             string_type cp(std::from_range, std::move(r), get_allocator());
             return no_alias_replace(pos, count, cp);

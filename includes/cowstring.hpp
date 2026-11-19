@@ -903,6 +903,7 @@ private:
 
     basic_cow_string& no_alias_replace(size_type pos, size_type count, std::span<const char_type> buffer)
         pre (!storage.self_alias(buffer.data()))
+        post (exclusive())
     {
         const char_type* const src = buffer.data();
         const size_type add_size = buffer.size();
@@ -911,47 +912,81 @@ private:
         return *this;
     }
 
-    bool try_inplace_self_replace(size_type pos, size_type count, std::span<const char_type> buffer)
+    template<std::input_iterator Iter, std::sized_sentinel_for<Iter> Sent>
+    basic_cow_string& replace_using_buffer(size_type pos, size_type count, Iter iter, Sent sent)
+        post (exclusive())
     {
-        if (!exclusive()) {
-            return false;
+        static constexpr std::size_t static_buffer_max = 2048 / sizeof(char_type);
+        std::ranges::subrange r(std::move(iter), std::move(sent));
+        const size_type add_size = std::ranges::distance(r);
+        if (add_size <= static_buffer_max) {
+            return [this] [[gnu::noinline]] (this auto, auto pos, auto count, auto r) -> auto& {
+                using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
+                buffer_type buffer(std::from_range, std::move(r));
+                return no_alias_replace(pos, count, buffer);
+            }(pos, count, std::move(r));
         }
-        const char_type* const src = buffer.data();
-        const size_type add_size = buffer.size();
+        string_type cp(std::from_range, std::move(r), get_allocator());
+        return no_alias_replace(pos, count, cp);
+    }
+
+    basic_cow_string& string_replace(size_type pos, size_type count, string_view_type srcstr)
+        post (exclusive())
+    {
+        if (!storage.self_alias(srcstr.data())) {
+            return no_alias_replace(pos, count, srcstr);
+        }
+        const size_type add_size = srcstr.size();
+        if (!exclusive()) {
+            basic_cow_string cp(*this, get_allocator());
+            cp.adjust_old_for_replace(pos, count, add_size);
+            details::spanmov(
+                std::as_bytes(std::span(srcstr.data(), add_size)),
+                std::as_writable_bytes(std::span(cp.storage.data() + pos, add_size))
+            );
+            cp.swap(*this);
+            return *this;
+        }
         const size_type old_size = size();
         const size_type rcount = std::ranges::min(count, old_size - pos);
-        const size_type new_size = old_size - rcount + add_size;
-        if (new_size > real_capacity()) {
-            return false;
+        const size_type new_size = std::saturating_add(old_size - rcount, add_size);
+        const size_type old_real_cap = real_capacity();
+        if (new_size > old_real_cap) {
+            basic_cow_string cp(*this, get_allocator());
+            cp.reallocate_for_replace(pos, old_size, add_size, new_size, rcount,
+                details::growing(old_real_cap, new_size, max_size()));
+            details::spanmov(
+                std::as_bytes(std::span(srcstr.data(), add_size)),
+                std::as_writable_bytes(std::span(cp.storage.data() + pos, add_size))
+            );
+            cp.swap(*this);
+            return *this;
         }
         std::span<char_type> alloc = status().allocated
             ? storage.allocation()
             : std::span<char_type>(storage.sso.data);
         char_type* const data = alloc.data();
         const char_type* const old_data = std::as_const(*this).data();
-        std::span<const char_type> head(old_data, pos);
-        std::span<const char_type> tail(old_data + pos + rcount, old_data + old_size);
-        std::span<const char_type> source(src, src + add_size);
-        std::span<char_type> head_dest(data, pos);
-        std::span<char_type> tail_dest(data + pos + add_size, data + new_size);
-        std::span<char_type> source_dest(data + pos, data + pos + add_size);
-        if (details::try_inplace_self_replace(
-                std::as_bytes(head),
-                std::as_bytes(tail),
-                std::as_bytes(source),
-                std::as_writable_bytes(head_dest),
-                std::as_writable_bytes(tail_dest),
-                std::as_writable_bytes(source_dest)
-            )) {
+        const auto head = std::as_bytes(std::span(old_data, pos));
+        const auto tail = std::as_bytes(std::span(old_data + pos + rcount, old_data + old_size));
+        const auto source = std::as_bytes(std::span(srcstr));
+        const auto head_dest = std::as_writable_bytes(std::span(data, pos));
+        const auto tail_dest = std::as_writable_bytes(std::span(data + pos + add_size, data + new_size));
+        const auto source_dest = std::as_writable_bytes(std::span(data + pos, data + pos + add_size));
+        const bool result = details::try_inplace_self_replace(
+            head, tail, source, head_dest, tail_dest, source_dest);
+        if (result) {
             if (status().allocated) {
                 storage.dyn.data = data;
                 storage.dyn.size = new_size;
             } else {
                 storage.sso.size = static_cast<unsigned char>(new_size);
             }
-            return true;
+            return *this;
         }
-        return false;
+        // Exclusive and have enough capacity, but algorithm fail to replace in-place.
+        const char_type* iter = srcstr.data();
+        return replace_using_buffer(pos, count, iter, iter + add_size);
     }
 
 public:
@@ -1937,15 +1972,10 @@ public:
     {
         check_pos(pos);
         if constexpr (details::string_like_iter<Iter, char_type>) {
-            const size_type add_size = std::ranges::distance(iter, sent);
-            const char_type* const src = std::to_address(iter);
-            if (!storage.self_alias(src)) {
-                return no_alias_replace(pos, count, { src, add_size });
-            }
-            if (try_inplace_self_replace(pos, count, { src, add_size })) {
-                // May fallthrough to the next branch if self-replacement is not possible.
-                return *this;
-            }
+            return string_replace(pos, count, {
+                std::to_address(iter),
+                static_cast<size_type>(std::ranges::distance(iter, sent))
+            });
         } else if constexpr (details::can_direct_replace<Iter, char_type>()) {
             const size_type add_size = std::ranges::distance(iter, sent);
             const auto* const src = std::to_address(iter);
@@ -1954,46 +1984,35 @@ public:
             adjust_old_for_replace(pos, count, add_size);
             std::ranges::copy_n(src, add_size, storage.data() + pos);
             return *this;
-        }
-        if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
+        } else if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
             const size_type add_size = std::ranges::distance(iter, sent);
             if (!exclusive() || (status() == details::small && empty())) {
                 basic_cow_string cp(*this, get_allocator());
                 cp.adjust_old_for_replace(pos, count, add_size);
-                std::ranges::copy_n(iter, add_size, cp.storage.data() + pos);
+                std::ranges::copy_n(std::move(iter), add_size, cp.storage.data() + pos);
                 cp.swap(*this);
                 return *this;
             }
             const size_type old_size = size();
             const size_type rcount = std::ranges::min(count, old_size - pos);
-            const size_type new_size = old_size - rcount + add_size;
+            const size_type new_size = std::saturating_add(old_size - rcount, add_size);
             const size_type old_real_cap = real_capacity();
             if (new_size > old_real_cap) {
                 basic_cow_string cp(*this, get_allocator());
                 cp.reallocate_for_replace(pos, old_size, add_size, new_size, rcount,
                     details::growing(old_real_cap, new_size, max_size()));
-                std::ranges::copy_n(iter, add_size, cp.storage.data() + pos);
+                std::ranges::copy_n(std::move(iter), add_size, cp.storage.data() + pos);
                 cp.swap(*this);
                 return *this;
             }
-            auto r = [&iter, add_size] {
-                if constexpr (std::random_access_iterator<Iter>) {
-                    return std::ranges::subrange(iter, iter + add_size);
-                } else {
-                    return std::ranges::subrange(
-                        std::counted_iterator(std::move(iter), add_size),
-                        std::default_sentinel
-                    );
-                }
-            }();
-            static constexpr std::size_t static_buffer_max = 1024 / sizeof(char_type);
-            if (add_size <= static_buffer_max) {
-                using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
-                buffer_type buffer(std::from_range, std::move(r));
-                return no_alias_replace(pos, count, buffer);
+            if constexpr (std::random_access_iterator<Iter>) {
+                return replace_using_buffer(pos, count, iter, iter + add_size);
+            } else {
+                return replace_using_buffer(pos, count,
+                    std::counted_iterator(std::move(iter), add_size),
+                    std::default_sentinel
+                );
             }
-            string_type cp(std::from_range, std::move(r), get_allocator());
-            return no_alias_replace(pos, count, cp);
         } else {
             if (status() == details::small && empty()) {
                 // Although we know nothing about source range,

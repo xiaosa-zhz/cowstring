@@ -1697,7 +1697,7 @@ public:
     basic_cow_string& append(size_type count, char_type ch)
         post (exclusive())
     {
-        resize(size() + count, ch);
+        resize(std::saturating_add(size(), count), ch);
         return *this;
     }
 
@@ -1974,10 +1974,10 @@ public:
         if constexpr (details::string_like_iter<Iter, char_type>) {
             return string_replace(pos, count, {
                 std::to_address(iter),
-                static_cast<size_type>(std::ranges::distance(iter, sent))
+                std::saturating_cast<size_type>(std::ranges::distance(iter, sent))
             });
         } else if constexpr (details::can_direct_replace<Iter, char_type>()) {
-            const size_type add_size = std::ranges::distance(iter, sent);
+            const size_type add_size = std::saturating_cast<size_type>(std::ranges::distance(iter, sent));
             const auto* const src = std::to_address(iter);
             // If someone break strick aliasing then we are cooked here.
             contract_assert(!storage.self_alias(src));
@@ -1985,7 +1985,7 @@ public:
             std::ranges::copy_n(src, add_size, storage.data() + pos);
             return *this;
         } else if constexpr (std::sized_sentinel_for<Sent, Iter> || std::forward_iterator<Iter>) {
-            const size_type add_size = std::ranges::distance(iter, sent);
+            const size_type add_size = std::saturating_cast<size_type>(std::ranges::distance(iter, sent));
             if (!exclusive() || (status() == details::small && empty())) {
                 basic_cow_string cp(*this, get_allocator());
                 cp.adjust_old_for_replace(pos, count, add_size);
@@ -2146,7 +2146,7 @@ constexpr COWString operator+(basic_cow_string<CharT, Allocator> lhs,
     if consteval {
         return COWString(std::basic_string<CharT>(lhs) + std::basic_string<CharT>(rhs));
     } else {
-        const auto total_size = lhs.size() + rhs.size();
+        const auto total_size = std::saturating_add(lhs.size(), rhs.size());
         const auto lhs_capacity = lhs.real_capacity();
         const auto rhs_capacity = rhs.real_capacity();
         if (lhs.exclusive() && lhs_capacity >= total_size) {

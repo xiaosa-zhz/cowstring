@@ -38,8 +38,10 @@ template<typename CharT>
 inline constexpr bool is_valid_char_type =
     std::ranges::find(valid_char_types, ^^CharT) != std::ranges::end(valid_char_types);
 
-inline constexpr std::size_t max_char_alignment = alignment_of(
-    std::ranges::max(valid_char_types, {}, &std::meta::alignment_of));
+inline constexpr std::size_t max_char_alignment = [] {
+    const auto info = std::ranges::max(valid_char_types, {}, &std::meta::alignment_of);
+    return std::ranges::min(4uz, alignment_of(info));
+}();
 
 template<typename SizeT, typename CharT>
 inline constexpr SizeT cow_max_size = std::numeric_limits<SizeT>::max() / (sizeof(CharT) * 2);
@@ -56,7 +58,9 @@ struct alignas(max_char_alignment) ctrl_blk {
 template<typename Alloc,
          typename Traits = std::allocator_traits<Alloc>,
          typename SizeT = Traits::size_type>
-ctrl_blk<SizeT>* allocate(const Alloc& source, std::type_identity_t<SizeT> capacity) {
+ctrl_blk<SizeT>* allocate(const Alloc& source, std::type_identity_t<SizeT> capacity)
+    post (r : r != nullptr && std::is_sufficiently_aligned<max_char_alignment>(r))
+{
     using size_type = SizeT;
     using header = ctrl_blk<size_type>;
     using allocator = Traits::template rebind_alloc<header>;
@@ -80,7 +84,9 @@ ctrl_blk<SizeT>* allocate(const Alloc& source, std::type_identity_t<SizeT> capac
 template<typename Alloc,
          typename Traits = std::allocator_traits<Alloc>,
          typename SizeT = Traits::size_type>
-void deallocate(const Alloc& source, std::type_identity_t<ctrl_blk<SizeT>>* block) noexcept {
+void deallocate(const Alloc& source, std::type_identity_t<ctrl_blk<SizeT>>* block) noexcept
+    pre (block != nullptr)
+{
     using header = ctrl_blk<SizeT>;
     using allocator = Traits::template rebind_alloc<header>;
     using traits = std::allocator_traits<allocator>;

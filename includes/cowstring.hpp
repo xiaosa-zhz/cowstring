@@ -912,6 +912,16 @@ private:
         return *this;
     }
 
+    template<std::size_t BufSize, std::ranges::input_range R>
+        requires std::ranges::sized_range<R>
+    [[gnu::noinline]] basic_cow_string& replace_using_local_buffer(size_type pos, size_type count, R r)
+        post (exclusive())
+    {
+        using buffer_type = std::inplace_vector<char_type, BufSize>;
+        buffer_type buffer(std::from_range, std::move(r));
+        return no_alias_replace(pos, count, buffer);
+    }
+
     template<std::input_iterator Iter, std::sized_sentinel_for<Iter> Sent>
     basic_cow_string& replace_using_buffer(size_type pos, size_type count, Iter iter, Sent sent)
         post (exclusive())
@@ -920,11 +930,7 @@ private:
         std::ranges::subrange r(std::move(iter), std::move(sent));
         const size_type add_size = std::ranges::distance(r);
         if (add_size <= static_buffer_max) {
-            return [this] [[gnu::noinline]] (this auto, auto pos, auto count, auto r) -> auto& {
-                using buffer_type = std::inplace_vector<char_type, static_buffer_max>;
-                buffer_type buffer(std::from_range, std::move(r));
-                return no_alias_replace(pos, count, buffer);
-            }(pos, count, std::move(r));
+            return replace_using_local_buffer<static_buffer_max>(pos, count, std::move(r));
         }
         string_type cp(std::from_range, std::move(r), get_allocator());
         return no_alias_replace(pos, count, cp);
@@ -985,7 +991,7 @@ private:
             return *this;
         }
         // Exclusive and have enough capacity, but algorithm fail to replace in-place.
-        const char_type* iter = srcstr.data();
+        const char_type* const iter = srcstr.data();
         return replace_using_buffer(pos, count, iter, iter + add_size);
     }
 
@@ -2010,8 +2016,7 @@ public:
             } else {
                 return replace_using_buffer(pos, count,
                     std::counted_iterator(std::move(iter), add_size),
-                    std::default_sentinel
-                );
+                    std::default_sentinel);
             }
         } else {
             if (status() == details::small && empty()) {
@@ -2093,8 +2098,9 @@ public:
                 const auto iter = std::ranges::begin(r);
                 return replace(pos, count, iter, iter + size);
             } else {
-                std::counted_iterator iter(std::ranges::begin(r), size);
-                return replace(pos, count, std::move(iter), std::default_sentinel);
+                return replace(pos, count,
+                    std::counted_iterator(std::ranges::begin(r), size),
+                    std::default_sentinel);
             }
         } else {
             return replace(pos, count, std::ranges::begin(r), std::ranges::end(r));

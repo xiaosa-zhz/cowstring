@@ -103,7 +103,7 @@ template<typename CharT, typename SizeT>
 struct dyn_string {
     const CharT* data = nullptr;
     SizeT size = 0;
-    std::uintptr_t control : (sizeof(SizeT) * CHAR_BIT - 2) = 0;
+    std::uintptr_t control : (sizeof(std::uintptr_t) * CHAR_BIT - 2) = 0;
     mutable std::uintptr_t shared : 1 = 0;
     std::uintptr_t allocated : 1 = 1;
 };
@@ -165,7 +165,9 @@ union storage {
     sso_type sso;
 
     static_assert(sizeof(dyn) == sizeof(sta) && sizeof(dyn) == sizeof(sso));
-    static_assert(sizeof(SizeT) >= sizeof(void*));
+    static_assert(std::is_same_v<std::size_t, SizeT>);
+    static_assert(sizeof(void*) == sizeof(std::uintptr_t));
+    static_assert(sizeof(void*) == sizeof(std::size_t));
 
     constexpr details::status status() const noexcept {
         if consteval {

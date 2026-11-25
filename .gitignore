@@ -8,3 +8,7 @@ build/
 
 # VSCode settings and cache
 .vscode/
+
+# LS
+compile_commands.json
+clice.toml
